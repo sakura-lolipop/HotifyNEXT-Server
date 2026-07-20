@@ -1,0 +1,14 @@
+{
+  "server": { "addr": ":25240" },
+  "pushkit": {
+    "project_id": "",
+    "private_key_path": "private.json",
+    "region": "CN"
+  },
+  "store": {
+    "type": "bbolt",
+    "path": "hotify.db",
+    "blob_dir": "./blobs/",
+    "max_bytes": 1073741824
+  }
+}

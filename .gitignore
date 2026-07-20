@@ -1,0 +1,28 @@
+# 二进制构建产物
+*.exe
+hotify-server
+hotify-server.exe
+/bin/
+
+# 本地配置（含机密：服务账号 RSA 私钥路径、project_id）——永不入库
+config.json
+config.local.json
+private.json
+*.key
+*.p12
+
+# Go
+vendor/
+
+# 持久化数据库（sqlite 将来）
+*.db
+*.sqlite
+
+# IDE / 临时
+.idea/
+.vscode/
+*.log
+
+# AI / 方法学文档：本地留存，不入库
+CLAUDE.md
+taskNEXT.md
