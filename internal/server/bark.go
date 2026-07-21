@@ -74,16 +74,16 @@ var barkFieldRules = map[string]barkFieldRule{
 	"group": {"drop", ""},
 
 	// 真·丢（端侧 profile / App 全局 / §9 §14 取舍）
-	"sound":      {"drop", ""}, // 端侧呈现 profile（须 App 预置 rawfile，§6），不进 Message 一等字段
-	"badge":      {"drop", ""}, // App 图标全局状态，每条存无意义
-	"volume":     {"drop", ""}, // critical 铃声音量，端侧 profile
-	"ciphertext": {"drop", ""}, // §9 全程明文，不兼容 bark 端到端加密
-	"iv":         {"drop", ""}, // §1.6 端到端加密 iv，对齐 ciphertext drop（§9 明文不兼容）
-	"isarchive":  {"drop", ""}, // §14 Hotify 历史全存，字段冗余
-	"ttl":        {"drop", ""}, // 同 isArchive（§14 全存，TTL 无意义）
-	"action":     {"drop", ""}, // PushKit clickAction 必填，无法"无动作"（bark.md §3 ⚠️ 待验）
-	"delete":     {"drop", ""}, // CP3 不做撤回（留口，bark.md §2）
-	"id":         {"drop", ""}, // Hotify 用 HLC（§7），bark id 冗余
+	"sound":        {"drop", ""}, // 端侧呈现 profile（须 App 预置 rawfile，§6），不进 Message 一等字段
+	"badge":        {"drop", ""}, // App 图标全局状态，每条存无意义
+	"volume":       {"drop", ""}, // critical 铃声音量，端侧 profile
+	"ciphertext":   {"drop", ""}, // §9 全程明文，不兼容 bark 端到端加密
+	"iv":           {"drop", ""}, // §1.6 端到端加密 iv，对齐 ciphertext drop（§9 明文不兼容）
+	"isarchive":    {"drop", ""}, // §14 Hotify 历史全存，字段冗余
+	"ttl":          {"drop", ""}, // 同 isArchive（§14 全存，TTL 无意义）
+	"action":       {"drop", ""}, // PushKit clickAction 必填，无法"无动作"（bark.md §3 ⚠️ 待验）
+	"delete":       {"drop", ""}, // CP3 不做撤回（留口，bark.md §2）
+	"id":           {"drop", ""}, // Hotify 用 HLC（§7），bark id 冗余
 	"device_keys":  {"drop", ""}, // 批量推送 V2 专属（route_push.go:111-125），低优先级 CP3 不做
 	"device_key":   {"drop", ""}, // path 段已取 key（segs[0]），body/query 里的忽略避免重复
 	"device_token": {"drop", ""}, // server 内部（注册时存），非协议字段

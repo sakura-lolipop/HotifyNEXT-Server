@@ -82,7 +82,7 @@ func (s *Server) fanoutPush(msg model.Message, dev model.Device) error {
 		log.Printf("[push] device %s empty push token, saved but not pushed", msg.TargetUUID)
 		return nil
 	}
-	return s.pk.Send(msg, dev)
+	return s.pusher.Send(msg, dev)
 }
 
 // handleAPIPush 原生推送端点（CP3b，Hotify App 主路径）。

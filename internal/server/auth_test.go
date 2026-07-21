@@ -404,10 +404,10 @@ func TestExtractKey1_HeaderPriority(t *testing.T) {
 // 防 Authorization: Basic xxx 的 Basic 值被当 key1 误放行（extractKey1 只匹配 Bearer 前缀，但契约未锁）。
 func TestExtractKey1_NonBearerScheme(t *testing.T) {
 	cases := []string{
-		"Basic abc123",        // Basic 认证不应被当 key1
-		"Digest username=x",   // Digest 同
-		"Token xyz",           // 非 Bearer 的其他 scheme
-		"bearer abc",          // 小写 bearer——EqualFold 匹配 Bearer 前缀大小写不敏感，会提取（验证大小写不敏感契约，非 bug）
+		"Basic abc123",      // Basic 认证不应被当 key1
+		"Digest username=x", // Digest 同
+		"Token xyz",         // 非 Bearer 的其他 scheme
+		"bearer abc",        // 小写 bearer——EqualFold 匹配 Bearer 前缀大小写不敏感，会提取（验证大小写不敏感契约，非 bug）
 	}
 	for _, auth := range cases {
 		req, err := http.NewRequest(http.MethodGet, "/messages/x", nil)

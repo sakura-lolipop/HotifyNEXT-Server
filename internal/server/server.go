@@ -6,7 +6,9 @@
 //	GET  /messages/{key}     拉历史（最近 50 条；套 requireKey1，CP3b 改 /api/v1/messages?since=HLC）
 //
 // CP3a：bark 包搬进 server（internal/bark 删，TD-3 同源消除）+ envelope 类型化（response.go，TD-3）+
-//   删 /read 410 双胞胎（TD-4：§14 砍 read set，端点重排时清干净）。
+//
+//	删 /read 410 双胞胎（TD-4：§14 砍 read set，端点重排时清干净）。
+//
 // CP3b：原生 /api/v1/push + 共享 ingest + Pusher 宽签名 + bark 接 ingest。
 // 部署前提（R4）：first-set 窗口由首个原生 /api/v1/register 关闭——NEXT 部署须跑 NEXT App（仅 legacy /register 会留窗口 A）。
 package server
@@ -20,17 +22,18 @@ import (
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/config"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/util"
 )
 
 type Server struct {
-	cfg *config.Config
-	st  store.Store
-	pk  Pusher // CP3b: Pusher interface（pushkit/iOS/安卓 adapter，CP4+）；*pushkit.Client 已满足
+	cfg    *config.Config
+	st     store.Store
+	pusher Pusher // CP3b: Pusher interface（pushkit/iOS/安卓 adapter，CP4+）；*pushkit.Client 已满足
 }
 
-// New 装配 server。pk 是 Pusher（*pushkit.Client 已满足，main.go 传 pushkit.New(...) 零改）。
-func New(cfg *config.Config, st store.Store, pk Pusher) *Server {
-	return &Server{cfg: cfg, st: st, pk: pk}
+// New 装配 server。pusher 是 Pusher（*pushkit.Client 已满足，main.go 传 pushkit.New(...) 零改）。
+func New(cfg *config.Config, st store.Store, pusher Pusher) *Server {
+	return &Server{cfg: cfg, st: st, pusher: pusher}
 }
 
 // Handler 返回 HTTP handler（mux + log 中间件），供 httptest 测试 + main 装配。
@@ -41,12 +44,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/push", s.requireKey1(s.handleAPIPush))   // 原生推送（CP3b，key1 准入）
 	mux.HandleFunc("POST /register", s.handleRegister)                    // 旧字段兼容（无 key1）
 	mux.HandleFunc("GET /messages/{key}", s.requireKey1(s.handleHistory)) // 读端点 key1 准入（CP2，§19）
-	mux.HandleFunc("/read/{key}", s.handleReadDeprecated) // §14 砍 read set → 410（TD-4 合一：保留路由避免旧 App 落 bark 兜底灌空消息）
-	mux.HandleFunc("/api/", s.handleNotFound)      // /api/ 子树兜底 404（POST /api/v1/* 精确优先；防失配 method 落 bark 兜底污染 msgs——CP3b 功能审 #15）
-	mux.HandleFunc("/share/", s.handleNotFound)    // /share/ 子树兜底 404（CP6 跨户端点前缀，同防）
-	mux.HandleFunc("/messages/", s.handleNotFound) // /messages/ 子树兜底 404（GET /messages/{key} 精确优先；防 POST/PUT 等 method 失配落 bark 兜底建 TargetUUID="messages" 污染——CP3c 跨层审）
-	mux.HandleFunc("/register/", s.handleNotFound) // /register/ 子树兜底 404（POST /register 精确优先；防 /register/xxx 子路径落 bark 兜底建 TargetUUID="register" 污染——CP3c 跨层审）
-	mux.HandleFunc("/", s.handleBark) // 兜底 bark 入口 /{key}...（§鉴权表"域内无"= design：bark 零摩擦卖点，写开放靠部署层 LAN 兜，非漏接；与 §19 读端点 key1 准入正交）
+	mux.HandleFunc("/read/{key}", s.handleReadDeprecated)                 // §14 砍 read set → 410（TD-4 合一：保留路由避免旧 App 落 bark 兜底灌空消息）
+	mux.HandleFunc("/api/", s.handleNotFound)                             // /api/ 子树兜底 404（POST /api/v1/* 精确优先；防失配 method 落 bark 兜底污染 msgs——CP3b 功能审 #15）
+	mux.HandleFunc("/share/", s.handleNotFound)                           // /share/ 子树兜底 404（CP6 跨户端点前缀，同防）
+	mux.HandleFunc("/messages/", s.handleNotFound)                        // /messages/ 子树兜底 404（GET /messages/{key} 精确优先；防 POST/PUT 等 method 失配落 bark 兜底建 TargetUUID="messages" 污染——CP3c 跨层审）
+	mux.HandleFunc("/register/", s.handleNotFound)                        // /register/ 子树兜底 404（POST /register 精确优先；防 /register/xxx 子路径落 bark 兜底建 TargetUUID="register" 污染——CP3c 跨层审）
+	mux.HandleFunc("/", s.handleBark)                                     // 兜底 bark 入口 /{key}...（§鉴权表"域内无"= design：bark 零摩擦卖点，写开放靠部署层 LAN 兜，非漏接；与 §19 读端点 key1 准入正交）
 	return logReq(mux)
 }
 
@@ -87,7 +90,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "register failed: "+err.Error())
 		return
 	}
-	log.Printf("[register-legacy] device=%s token=%s (old App, no key1 first-set)", b.DeviceKey, mask(b.PushToken))
+	log.Printf("[register-legacy] device=%s token=%s (old App, no key1 first-set)", b.DeviceKey, util.Mask(b.PushToken))
 	writeOK(w, msgRegistered)
 }
 
@@ -98,7 +101,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // Request:  Authorization: Bearer {key1}（窗口 A 可省）+ JSON {uuid, platform, push_token, type?, name?}
 // Response 成功: {code:200, message, key1, key2}（registerResp，无 timestamp——native 干净）
 // Response 错误: {code:400/500, message}（writeAPIError JSON——native 错误统一 JSON 化，TD-3 顺带；
-//   legacy /register 例外保留 http.Error 纯文本兼容老 App——审查 P1 承认此设计变更）
+//
+//	legacy /register 例外保留 http.Error 纯文本兼容老 App——审查 P1 承认此设计变更）
 func (s *Server) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		UUID      string `json:"uuid"`
@@ -146,7 +150,7 @@ func (s *Server) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[register] device=%s platform=%s token=%s", body.UUID, body.Platform, mask(body.PushToken))
+	log.Printf("[register] device=%s platform=%s token=%s", body.UUID, body.Platform, util.Mask(body.PushToken))
 	writeRegister(w, key1, keys.Key2)
 }
 
@@ -181,10 +185,4 @@ func logReq(h http.Handler) http.Handler {
 	})
 }
 
-// mask token 脱敏（日志用）。
-func mask(t string) string {
-	if len(t) <= 8 {
-		return "***"
-	}
-	return t[:4] + "..." + t[len(t)-4:]
-}
+// mask 脱敏移到 internal/util.Mask（server + pushkit 共用，TD-2 批 DRY）。

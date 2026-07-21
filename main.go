@@ -56,8 +56,8 @@ func main() {
 		log.Fatalf("ensure key2: %v", err)
 	}
 
-	pk := pushkit.New(cfg.PushKit)
-	srv := server.New(cfg, st, pk)
+	pusher := pushkit.New(cfg.PushKit)
+	srv := server.New(cfg, st, pusher)
 	log.Printf("HotifyServer listening on %s (store=%s, pushkit=%t)",
 		cfg.Server.Addr, cfg.Store.Type, cfg.PushKit.ProjectID != "")
 	if err := srv.Run(); err != nil {

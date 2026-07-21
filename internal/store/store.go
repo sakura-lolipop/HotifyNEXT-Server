@@ -397,6 +397,16 @@ func loadKeys(tx *bolt.Tx) (model.Keys, error) {
 	return keys, nil
 }
 
+// saveKeys Marshal + Put keys 桶单值（TD-2 DRY：SetKey1FirstSet/EnsureKey2/ResolveRegisterKey 三处
+// loadKeys→改 KeyN→Marshal→Put 重复，抽此 helper；与 loadKeys 对称的写侧单点）。
+func saveKeys(tx *bolt.Tx, keys model.Keys) error {
+	data, err := json.Marshal(keys)
+	if err != nil {
+		return err
+	}
+	return tx.Bucket([]byte(bucketKeys)).Put([]byte(keyCurrent), data)
+}
+
 // key1Matches constant-time 比对 provided 与 current（secret 比对卫生，防时序侧信道）。
 // key1 固定 64-hex；长度不等直接 false（不泄露内容）。
 func key1Matches(provided, current string) bool {
@@ -421,7 +431,6 @@ func (s *BBolt) GetKeys() (model.Keys, error) {
 func (s *BBolt) SetKey1FirstSet(key1 string) (string, error) {
 	var result string
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		kb := tx.Bucket([]byte(bucketKeys))
 		// loadKeys 坏 JSON 不吞（B-6：吞了 keys.Key1=="" 误判"未设"→ first-set wins 被绕过）。
 		keys, loadErr := loadKeys(tx)
 		if loadErr != nil {
@@ -432,11 +441,7 @@ func (s *BBolt) SetKey1FirstSet(key1 string) (string, error) {
 			return nil
 		}
 		keys.Key1 = key1
-		data, err := json.Marshal(keys)
-		if err != nil {
-			return err
-		}
-		if err := kb.Put([]byte(keyCurrent), data); err != nil {
+		if err := saveKeys(tx, keys); err != nil {
 			return err
 		}
 		result = key1
@@ -449,7 +454,6 @@ func (s *BBolt) SetKey1FirstSet(key1 string) (string, error) {
 func (s *BBolt) EnsureKey2() (string, error) {
 	var result string
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		kb := tx.Bucket([]byte(bucketKeys))
 		// loadKeys 坏 JSON 不吞（同 SetKey1FirstSet B-6；否则 keys.Key2=="" 误判"未生成"→ key2 被重置）。
 		keys, loadErr := loadKeys(tx)
 		if loadErr != nil {
@@ -464,11 +468,7 @@ func (s *BBolt) EnsureKey2() (string, error) {
 			return err
 		}
 		keys.Key2 = newKey2
-		data, err := json.Marshal(keys)
-		if err != nil {
-			return err
-		}
-		if err := kb.Put([]byte(keyCurrent), data); err != nil {
+		if err := saveKeys(tx, keys); err != nil {
 			return err
 		}
 		result = newKey2
@@ -519,7 +519,6 @@ func (s *BBolt) ResolveRegisterKey(provided string) (string, bool, error) {
 	var authKey1 string
 	var allowed bool
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		kb := tx.Bucket([]byte(bucketKeys))
 		keys, loadErr := loadKeys(tx)
 		if loadErr != nil {
 			return loadErr
@@ -531,12 +530,8 @@ func (s *BBolt) ResolveRegisterKey(provided string) (string, bool, error) {
 				return genErr
 			}
 			keys.Key1 = newKey1
-			data, marshalErr := json.Marshal(keys)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			if putErr := kb.Put([]byte(keyCurrent), data); putErr != nil {
-				return putErr
+			if err := saveKeys(tx, keys); err != nil {
+				return err
 			}
 			authKey1 = newKey1
 			allowed = true
@@ -561,4 +556,3 @@ func newID() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
-

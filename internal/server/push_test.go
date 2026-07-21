@@ -57,10 +57,10 @@ func (errGetDeviceStore) GetDevice(string) (model.Device, error) {
 }
 
 // newPushServerWithStore 起 server 用指定 store（mock store 注入 err 用）。
-func newPushServerWithStore(t *testing.T, pk Pusher, st store.Store) *httptest.Server {
+func newPushServerWithStore(t *testing.T, pusher Pusher, st store.Store) *httptest.Server {
 	t.Helper()
 	cfg := &config.Config{Server: config.ServerConfig{Addr: ":0"}}
-	srv := New(cfg, st, pk)
+	srv := New(cfg, st, pusher)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -68,7 +68,7 @@ func newPushServerWithStore(t *testing.T, pk Pusher, st store.Store) *httptest.S
 
 // newPushServer 起 server 指定 pusher（默认空 pushkit stub 只存不推；测 push 失败传 failPusher）。
 // 返 *store.BBolt 让测试 MessagesSince 回查落库。
-func newPushServer(t *testing.T, pk Pusher) (*httptest.Server, *store.BBolt) {
+func newPushServer(t *testing.T, pusher Pusher) (*httptest.Server, *store.BBolt) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "push.db")
@@ -88,7 +88,7 @@ func newPushServer(t *testing.T, pk Pusher) (*httptest.Server, *store.BBolt) {
 			MaxBytes: 1 << 30,
 		},
 	}
-	srv := New(cfg, bb, pk)
+	srv := New(cfg, bb, pusher)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts, bb
@@ -268,6 +268,7 @@ func TestAPIPath_NotFound(t *testing.T) {
 		t.Errorf("msgs polluted: %d (want 0, GET /api/v1/push 不该建消息)", len(msgs))
 	}
 }
+
 // goroutine 内不用 apiPush（其内部 t.Fatal 不 goroutine-safe），内联 http + t.Errorf。
 func TestAPIPush_Concurrent(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
@@ -444,8 +445,8 @@ func TestAPIPush_GetDeviceErr(t *testing.T) {
 // TestFanoutPush_NoTarget target_uuid 空 → fanoutPush no-target 分支（log + return nil，不调 Send）。
 // CP3c 跨审 C P1：fanoutPush 五分支零直接覆盖，用计数 Pusher 验 Send 未调用（no-target 隐式覆盖不可靠）。
 func TestFanoutPush_NoTarget(t *testing.T) {
-	pk := &countingPusher{}
-	ts, bb := newPushServer(t, pk)
+	pusher := &countingPusher{}
+	ts, bb := newPushServer(t, pusher)
 	key1 := registerFirstSet(t, ts, "dev1") // first-set 关窗口 A（push 无 target_uuid 仍落库不推）
 
 	resp, r := apiPush(t, ts.URL, key1, `{"body":"b"}`) // 无 target_uuid → no-target 分支
@@ -453,8 +454,8 @@ func TestFanoutPush_NoTarget(t *testing.T) {
 	if r.Code != 200 {
 		t.Errorf("no-target: code=%d msg=%q (want 200)", r.Code, r.Message)
 	}
-	if pk.calls != 0 {
-		t.Errorf("no-target 不该调 Send: calls=%d (want 0)", pk.calls)
+	if pusher.calls != 0 {
+		t.Errorf("no-target 不该调 Send: calls=%d (want 0)", pusher.calls)
 	}
 	msgs, _ := bb.MessagesSince(0, 10)
 	if len(msgs) != 1 {
@@ -466,7 +467,7 @@ func TestFanoutPush_NoTarget(t *testing.T) {
 // register 校验 token 非空，但 legacy /register 或未来 DELETE/ResetKeys 可能造空 token 设备——这条分支是防静默 success 假绿的留痕防线。
 // 直注空 token 设备绕过 register 校验（构造分支触发条件）。
 func TestFanoutPush_EmptyToken(t *testing.T) {
-	pk := &countingPusher{}
+	pusher := &countingPusher{}
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "empty.db")
 	bb, err := store.NewBBolt(dbPath)
@@ -481,7 +482,7 @@ func TestFanoutPush_EmptyToken(t *testing.T) {
 	if err := bb.RegisterDevice(model.Device{UUID: "emptydev", Platform: "harmony", PushToken: ""}); err != nil {
 		t.Fatalf("RegisterDevice emptydev: %v", err)
 	}
-	ts := newPushServerWithStore(t, pk, bb)
+	ts := newPushServerWithStore(t, pusher, bb)
 	key1 := registerFirstSet(t, ts, "firstset") // first-set key1（push 准入用，与 emptydev 无关）
 
 	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"emptydev"}`)
@@ -489,27 +490,27 @@ func TestFanoutPush_EmptyToken(t *testing.T) {
 	if r.Code != 200 {
 		t.Errorf("empty token: code=%d msg=%q (want 200, 消息落库不推)", r.Code, r.Message)
 	}
-	if pk.calls != 0 {
-		t.Errorf("empty token 不该调 Send: calls=%d (want 0, 留痕不推)", pk.calls)
+	if pusher.calls != 0 {
+		t.Errorf("empty token 不该调 Send: calls=%d (want 0, 留痕不推)", pusher.calls)
 	}
 }
 
 // TestIngest_TimestampBackfilled ingest 后 fanoutPush 收到的 msg.TS>0（CP3c 跨审 D P1：msg.TS 跨层回填）。
 // 验 push.go ingest 预填 TS（防 CP4 PushKit showBeginTime/归并 key 全 0）+ HLC 回填。
 func TestIngest_TimestampBackfilled(t *testing.T) {
-	pk := &countingPusher{}
-	ts, _ := newPushServer(t, pk)
+	pusher := &countingPusher{}
+	ts, _ := newPushServer(t, pusher)
 	key1 := registerFirstSet(t, ts, "dev1")
 
 	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
 	defer resp.Body.Close()
-	if r.Code != 200 || pk.calls != 1 {
-		t.Fatalf("push: code=%d msg=%q calls=%d (want 200, Send 调 1 次)", r.Code, r.Message, pk.calls)
+	if r.Code != 200 || pusher.calls != 1 {
+		t.Fatalf("push: code=%d msg=%q calls=%d (want 200, Send 调 1 次)", r.Code, r.Message, pusher.calls)
 	}
-	if pk.lastMsg.TS == 0 {
+	if pusher.lastMsg.TS == 0 {
 		t.Errorf("msg.TS 应回填非 0: got 0 (CP4 PushKit showBeginTime 会全 0/全归并)")
 	}
-	if pk.lastMsg.HLC == 0 {
+	if pusher.lastMsg.HLC == 0 {
 		t.Errorf("msg.HLC 应回填非 0: got 0")
 	}
 }

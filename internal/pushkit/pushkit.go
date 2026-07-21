@@ -9,6 +9,7 @@ import (
 	"log"
 
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/util"
 )
 
 // huaweiCategory 华为 notification.category 固定 SUBSCRIPTION（已过审 2026-07-02）。
@@ -44,8 +45,8 @@ func New(cfg Config) *Client {
 //  2. JWT 直接当 Authorization: Bearer（**不调 oauth2/v3/token 换 access_token**——旧桥走过这弯路）。
 //  3. POST https://push-api.cloud.huawei.com/v3/{project_id}/messages:send
 //     body: target{token:[dev.PushToken]} + payload{notification{title:msg.Title, body:msg.Body,
-//           category:huaweiCategory, clickAction{actionType:0, data: msg.Category+msg.URL}}
-//           + pushOptions{testMessage:true|false}}
+//     category:huaweiCategory, clickAction{actionType:0, data: msg.Category+msg.URL}}
+//     + pushOptions{testMessage:true|false}}
 //     header: push-type:0；成功码 80000000；死 token 80100000/80300007 删（CP4 全局闸门）。
 //
 // CP3 stub：ProjectID 空 / dev.PushToken 空 → 静默跳过（return nil）；否则返 not implemented。
@@ -54,14 +55,6 @@ func (c *Client) Send(msg model.Message, dev model.Device) error {
 		return nil // 调试模式 / 无 token：静默跳过
 	}
 	log.Printf("[pushkit] TODO Send → token=%s title=%q cat=%s url=%s",
-		mask(dev.PushToken), msg.Title, msg.Category, msg.URL)
+		util.Mask(dev.PushToken), msg.Title, msg.Category, msg.URL)
 	return fmt.Errorf("pushkit.Send not yet implemented（待 CP4 从 Python 桥移植 JWT+v3）")
-}
-
-// mask 脱敏 token（日志不泄露全量）。
-func mask(t string) string {
-	if len(t) <= 8 {
-		return "***"
-	}
-	return t[:4] + "..." + t[len(t)-4:]
 }
