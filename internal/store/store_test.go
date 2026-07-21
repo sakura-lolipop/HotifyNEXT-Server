@@ -465,6 +465,149 @@ func TestBBolt_ResetKeys(t *testing.T) {
 	}
 }
 
+// ── Keys 鉴权决策（CP2：AuthorizeRead/ResolveRegisterKey，§8/§19）──
+
+// TestBBolt_AuthorizeRead 读端点 key1 准入三态：未设锁（窗口 A 读端点全拒）/ first-set 后对放行 / 错·空拒。
+func TestBBolt_AuthorizeRead(t *testing.T) {
+	st := newTestBBolt(t)
+	// 未设（窗口 A）：读端点锁，任何 provided 都拒（§19，首注前防 share URL 静默拉历史）。
+	if ok, err := st.AuthorizeRead(""); err != nil || ok {
+		t.Errorf("unset+empty: ok=%v err=%v, want false/nil", ok, err)
+	}
+	if ok, err := st.AuthorizeRead("whatever"); err != nil || ok {
+		t.Errorf("unset+random: ok=%v err=%v, want false/nil", ok, err)
+	}
+	// first-set 后：对→true，错→false，空→false。
+	st.SetKey1FirstSet("the-key")
+	if ok, err := st.AuthorizeRead("the-key"); err != nil || !ok {
+		t.Errorf("set+correct: ok=%v err=%v, want true/nil", ok, err)
+	}
+	if ok, err := st.AuthorizeRead("wrong"); err != nil || ok {
+		t.Errorf("set+wrong: ok=%v err=%v, want false/nil", ok, err)
+	}
+	if ok, err := st.AuthorizeRead(""); err != nil || ok {
+		t.Errorf("set+empty: ok=%v err=%v, want false/nil", ok, err)
+	}
+}
+
+// TestBBolt_ResolveRegisterKey register 三态决策 + first-set：
+// 窗口 A first-set / 已设+对返 existing / 已设+错·空拒 / 窗口 A 带 stale 忽略（server 不采纳客户端 secret）。
+func TestBBolt_ResolveRegisterKey(t *testing.T) {
+	st := newTestBBolt(t)
+
+	// 1) 窗口 A（未设）+ 空 provided → first-set，返非空 winner，allowed=true。
+	k1, allowed, err := st.ResolveRegisterKey("")
+	if err != nil || !allowed || k1 == "" {
+		t.Fatalf("window A empty: k1=%q allowed=%v err=%v", k1, allowed, err)
+	}
+	if keys, _ := st.GetKeys(); keys.Key1 != k1 {
+		t.Errorf("persisted Key1=%q, want %q", keys.Key1, k1)
+	}
+
+	// 2) 已设 + 正确 provided → 返 existing，allowed=true（再注册/token 刷新路径）。
+	k1b, allowed2, err := st.ResolveRegisterKey(k1)
+	if err != nil || !allowed2 || k1b != k1 {
+		t.Errorf("set+correct: k1=%q allowed=%v, want %q/true", k1b, allowed2, k1)
+	}
+
+	// 3) 已设 + 错 provided → ("", false, nil)（401）。
+	got, gotAllowed, err := st.ResolveRegisterKey("wrong")
+	if err != nil || gotAllowed || got != "" {
+		t.Errorf("set+wrong: got=%q allowed=%v err=%v, want \"\"/false/nil", got, gotAllowed, err)
+	}
+
+	// 4) 已设 + 空 provided → ("", false, nil)（401，防 B 蹭全广播）。
+	got, gotAllowed, err = st.ResolveRegisterKey("")
+	if err != nil || gotAllowed || got != "" {
+		t.Errorf("set+empty: got=%q allowed=%v err=%v, want \"\"/false/nil", got, gotAllowed, err)
+	}
+
+	// 5) 窗口 A + stale provided（新 store）→ 忽略 stale，first-set 返 winner（≠ stale）。
+	stFresh := newTestBBolt(t)
+	k1c, allowed3, err := stFresh.ResolveRegisterKey("stale-attempt")
+	if err != nil || !allowed3 || k1c == "" || k1c == "stale-attempt" {
+		t.Errorf("window A stale: k1=%q allowed=%v, want non-empty != stale / true", k1c, allowed3)
+	}
+}
+
+// TestBBolt_ResolveRegisterKey_ConcurrentFirstSet 并发首注 first-set wins 不变量：
+// N goroutine 同放进入窗口 A → 恰一个 winner first-set，其余（bbolt Update 事务串行化）读到已设→false；
+// 所有 allowed=true 结果返同一 key1 + 落库一致（无两个不同 winner = CAS 未破）。容忍个别 false（窗口被 winner 关闭）。
+func TestBBolt_ResolveRegisterKey_ConcurrentFirstSet(t *testing.T) {
+	st := newTestBBolt(t)
+	const goroutines = 16
+	resolvedKeys := make([]string, goroutines)
+	resolvedAllowed := make([]bool, goroutines)
+	start := make(chan struct{}) // barrier：全部就绪后同放，最大化进入窗口 A 的并发
+	var wg sync.WaitGroup
+	for idx := 0; idx < goroutines; idx++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			got, gotOK, err := st.ResolveRegisterKey("")
+			if err != nil {
+				t.Errorf("ResolveRegisterKey: %v", err)
+				return
+			}
+			resolvedKeys[i] = got
+			resolvedAllowed[i] = gotOK
+		}(idx)
+	}
+	close(start)
+	wg.Wait()
+
+	// 不变量：所有 allowed=true 返同一 key1 + 落库一致。
+	var winner string
+	allowedCount := 0
+	for i := 0; i < goroutines; i++ {
+		if !resolvedAllowed[i] {
+			continue
+		}
+		allowedCount++
+		if winner == "" {
+			winner = resolvedKeys[i]
+		} else if resolvedKeys[i] != winner {
+			t.Errorf("first-set race: two different key1 %q vs %q (CAS broken)", winner, resolvedKeys[i])
+		}
+	}
+	if winner == "" {
+		t.Fatal("first-set race: no winner (all denied — unexpected)")
+	}
+	if persisted, _ := st.GetKeys(); persisted.Key1 != winner {
+		t.Errorf("first-set race: persisted Key1=%q, want winner %q", persisted.Key1, winner)
+	}
+	t.Logf("first-set race: %d/%d allowed (first-set wins), winner=%s", allowedCount, goroutines, winner)
+}
+
+// TestBBolt_Keys_CorruptBucket keys 桶坏 JSON → 所有读 keys 的方法返 err（不吞）。
+// R1 fail-closed 回归锚：err 必须冒泡到调用方（→ HTTP 500），不能被吞降级成 401（否则鉴权可能绕过）。
+// 仿 TestBBolt_MessagesSince_CorruptJSON：直接写坏 JSON 到 keys 桶单值。Memory 纯 struct 无法 corrupt，跳过。
+func TestBBolt_Keys_CorruptBucket(t *testing.T) {
+	st := newTestBBolt(t)
+	if err := st.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket([]byte(bucketKeys)).Put([]byte(keyCurrent), []byte("not json"))
+	}); err != nil {
+		t.Fatalf("inject corrupt: %v", err)
+	}
+	// 五条读 keys 路径都必须返 err（不吞、不伪装成功）——这是 R1 结构性消除依赖的不变量。
+	if _, err := st.GetKeys(); err == nil {
+		t.Error("GetKeys: want err on corrupt keys bucket, got nil")
+	}
+	if _, err := st.SetKey1FirstSet("k1"); err == nil {
+		t.Error("SetKey1FirstSet: want err on corrupt keys bucket, got nil")
+	}
+	if _, err := st.EnsureKey2(); err == nil {
+		t.Error("EnsureKey2: want err on corrupt keys bucket, got nil")
+	}
+	if _, err := st.AuthorizeRead("whatever"); err == nil {
+		t.Error("AuthorizeRead: want err on corrupt keys bucket, got nil")
+	}
+	if _, _, err := st.ResolveRegisterKey(""); err == nil {
+		t.Error("ResolveRegisterKey: want err on corrupt keys bucket, got nil")
+	}
+}
+
 // ── Media ──
 
 func TestBBolt_SaveGetMedia(t *testing.T) {
@@ -580,6 +723,36 @@ func TestMemory_SetKey1FirstSet_Wins(t *testing.T) {
 	got2, _ := st.SetKey1FirstSet("k2")
 	if got2 != "k1" {
 		t.Errorf("first-set wins: got %q, want k1", got2)
+	}
+}
+
+// TestMemory_AuthorizeRead Memory 实现语义同 BBolt（调试/单测覆盖）。
+func TestMemory_AuthorizeRead(t *testing.T) {
+	st := NewMemory()
+	if ok, err := st.AuthorizeRead(""); err != nil || ok {
+		t.Errorf("unset: ok=%v err=%v, want false/nil", ok, err)
+	}
+	st.SetKey1FirstSet("the-key")
+	if ok, err := st.AuthorizeRead("the-key"); err != nil || !ok {
+		t.Errorf("correct: ok=%v err=%v, want true/nil", ok, err)
+	}
+	if ok, err := st.AuthorizeRead("wrong"); err != nil || ok {
+		t.Errorf("wrong: ok=%v err=%v, want false/nil", ok, err)
+	}
+}
+
+// TestMemory_ResolveRegisterKey Memory 实现语义同 BBolt（mu 串行化等价 CAS）。
+func TestMemory_ResolveRegisterKey(t *testing.T) {
+	st := NewMemory()
+	k1, allowed, err := st.ResolveRegisterKey("")
+	if err != nil || !allowed || k1 == "" {
+		t.Fatalf("window A: k1=%q allowed=%v err=%v", k1, allowed, err)
+	}
+	if got, gotAllowed, err := st.ResolveRegisterKey("wrong"); err != nil || gotAllowed || got != "" {
+		t.Errorf("set+wrong: got=%q allowed=%v, want \"\"/false", got, gotAllowed)
+	}
+	if got, gotAllowed, err := st.ResolveRegisterKey(k1); err != nil || !gotAllowed || got != k1 {
+		t.Errorf("set+correct: got=%q allowed=%v, want %q/true", got, gotAllowed, k1)
 	}
 }
 

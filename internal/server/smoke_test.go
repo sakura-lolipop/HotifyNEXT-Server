@@ -18,7 +18,8 @@ import (
 )
 
 // newSmokeServer 起 httptest server（真 bbolt 临时文件 + 空 pushkit 只存不推）。
-func newSmokeServer(t *testing.T) (*httptest.Server, string) {
+// 返 *store.BBolt 让测试能 GetDevice/GetKeys 回查或注 corrupt 数据（CP2 审查后补）。
+func newSmokeServer(t *testing.T) (*httptest.Server, string, *store.BBolt) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "smoke.db")
@@ -27,6 +28,10 @@ func newSmokeServer(t *testing.T) (*httptest.Server, string) {
 		t.Fatalf("NewBBolt: %v", err)
 	}
 	t.Cleanup(func() { _ = bb.Close() })
+	// 启动 EnsureKey2（对齐 main.go：server 启动生成 key2，register 响应回显用）
+	if _, err := bb.EnsureKey2(); err != nil {
+		t.Fatalf("EnsureKey2: %v", err)
+	}
 	cfg := &config.Config{
 		Server: config.ServerConfig{Addr: ":0"},
 		Store: config.StoreConfig{
@@ -39,38 +44,49 @@ func newSmokeServer(t *testing.T) (*httptest.Server, string) {
 	srv := New(cfg, bb, pushkit.New(pushkit.Config{}))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, dbPath
+	return ts, dbPath, bb
 }
 
-// TestSmoke_RegisterPushHistory 验 register→bark push→history 全链路通 + bbolt 文件落盘。
+// TestSmoke_RegisterPushHistory 验 原生 register(first-set key1)→bark push→history(带 key1) 全链路通 + bbolt 落盘。
 func TestSmoke_RegisterPushHistory(t *testing.T) {
-	ts, dbPath := newSmokeServer(t)
+	ts, dbPath, _ := newSmokeServer(t)
 
-	// 1) register（旧字段名 device_key，CP1 临时映射 uuid）
-	resp, err := http.Post(ts.URL+"/register", "application/json",
-		strings.NewReader(`{"device_key":"dev1","push_token":"tok1","name":"phone"}`))
+	// 1) 原生 register（首设备不带 key1 → first-set + 下发 key1/key2）
+	resp, err := http.Post(ts.URL+"/api/v1/register", "application/json",
+		strings.NewReader(`{"uuid":"dev1","platform":"harmony","push_token":"tok1","name":"phone"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("register status: %d", resp.StatusCode)
+	var reg struct {
+		Code int    `json:"code"`
+		Key1 string `json:"key1"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reg); err != nil {
+		t.Fatal(err)
 	}
 	resp.Body.Close()
+	if reg.Code != 200 || reg.Key1 == "" {
+		t.Fatalf("register: code=%d key1=%q (want 200 + first-set key1)", reg.Code, reg.Key1)
+	}
 
-	// 2) bark push（路径式 /{key}/标题/内容）——pushkit stub 会 push 失败，但消息已落库
+	// 2) bark push（路径式 /{key}/标题/内容）——pushkit stub push 失败，但消息落库
 	resp, err = http.Post(ts.URL+"/dev1/标题/内容测试", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	// push 失败不挡 200（返 "saved but push failed" 或 "success"）
 	if !strings.Contains(string(body), "saved") && !strings.Contains(string(body), "success") {
 		t.Fatalf("push resp unexpected: %s", body)
 	}
 
-	// 3) history 拉得到（CP1 临时全局取，忽略 {key}）
-	resp, err = http.Get(ts.URL + "/messages/dev1")
+	// 3) history 拉得到（/messages 套了 requireKey1，带 key1 头）
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/messages/dev1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+reg.Key1)
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +119,7 @@ func TestSmoke_RegisterPushHistory(t *testing.T) {
 
 // TestSmoke_ReadSetDeprecated 验 §14 砍 read set → 返 410 Gone（防旧 App 404 噪声）。
 func TestSmoke_ReadSetDeprecated(t *testing.T) {
-	ts, _ := newSmokeServer(t)
+	ts, _, _ := newSmokeServer(t)
 	resp, err := http.Get(ts.URL + "/read/dev1")
 	if err != nil {
 		t.Fatal(err)

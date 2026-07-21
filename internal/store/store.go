@@ -10,6 +10,7 @@ package store
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -90,6 +91,11 @@ type Store interface {
 	SetKey1FirstSet(key1 string) (string, error) // first-set wins：已设返已存的
 	EnsureKey2() (string, error)                 // 启动调：未存在才生成
 	ResetKeys() error                            // CLI 紧急重置（CP1 占位实装）
+
+	// 鉴权决策（CP2，§8/§19）—— HTTP 层只调这两个，永不直接 GetKeys() 后判 Key1==""（那会复活 B-6 同源脚枪）。
+	// 两者返 fail-closed bool：err 被吞最坏误拒（401），绝不绕过。
+	AuthorizeRead(providedKey1 string) (authorized bool, err error)                // 读端点准入：true=放行 / false=拒（未设或不匹配）/ err=内部错(500)
+	ResolveRegisterKey(providedKey1 string) (key1 string, allowed bool, err error) // register 三态决策 + first-set（同事务 atomic CAS）
 
 	Close() error
 }
@@ -407,16 +413,38 @@ func (s *BBolt) GetCursor() (model.Cursor, error) {
 	return c, err
 }
 
-// ── Keys（first-set + 启动生成，§8/§9）──
+// ── Keys（first-set + 启动生成，§8/§9；CP2 加鉴权决策）──
+
+// loadKeys 读 keys 桶单值（CP2 抽出：GetKeys/SetKey1FirstSet/EnsureKey2/AuthorizeRead/ResolveRegisterKey 共用，
+// 单点 unmarshal + err 不吞——同源 B-6 防线集中一处，避免散落副本各自漏检）。
+// 未设返零值 model.Keys{} + nil（合法，调用方按 Key1/Key2=="" 判未设）；坏 JSON 返零值 + err（调用方必检）。
+func loadKeys(tx *bolt.Tx) (model.Keys, error) {
+	var keys model.Keys
+	v := tx.Bucket([]byte(bucketKeys)).Get([]byte(keyCurrent))
+	if v == nil {
+		return keys, nil
+	}
+	if err := json.Unmarshal(v, &keys); err != nil {
+		return model.Keys{}, fmt.Errorf("keys bucket corrupt: %w", err)
+	}
+	return keys, nil
+}
+
+// key1Matches constant-time 比对 provided 与 current（secret 比对卫生，防时序侧信道）。
+// key1 固定 64-hex；长度不等直接 false（不泄露内容）。
+func key1Matches(provided, current string) bool {
+	if current == "" {
+		return false // current 必非空：防 subtle.ConstantTimeCompare(空,空)==1 返 true 的 quirk（调用方虽先判未设，收进函数防 CP5 新调用方踩坑→鉴权绕过）
+	}
+	return len(provided) == len(current) && subtle.ConstantTimeCompare([]byte(provided), []byte(current)) == 1
+}
 
 func (s *BBolt) GetKeys() (model.Keys, error) {
 	var keys model.Keys
 	err := s.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket([]byte(bucketKeys)).Get([]byte(keyCurrent))
-		if v == nil {
-			return nil
-		}
-		return json.Unmarshal(v, &keys)
+		var loadErr error
+		keys, loadErr = loadKeys(tx)
+		return loadErr
 	})
 	return keys, err
 }
@@ -427,12 +455,10 @@ func (s *BBolt) SetKey1FirstSet(key1 string) (string, error) {
 	var result string
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		kb := tx.Bucket([]byte(bucketKeys))
-		var keys model.Keys
-		if v := kb.Get([]byte(keyCurrent)); v != nil {
-			// 坏 JSON 不吞（CLAUDE.md ④ + 子 agent B-6：吞了会让 keys.Key1=="" 误判"未设"→ first-set wins 被绕过）
-			if e := json.Unmarshal(v, &keys); e != nil {
-				return fmt.Errorf("keys bucket corrupt: %w", e)
-			}
+		// loadKeys 坏 JSON 不吞（B-6：吞了 keys.Key1=="" 误判"未设"→ first-set wins 被绕过）。
+		keys, loadErr := loadKeys(tx)
+		if loadErr != nil {
+			return loadErr
 		}
 		if keys.Key1 != "" {
 			result = keys.Key1 // 已设 → wins，不动
@@ -457,22 +483,20 @@ func (s *BBolt) EnsureKey2() (string, error) {
 	var result string
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		kb := tx.Bucket([]byte(bucketKeys))
-		var keys model.Keys
-		if v := kb.Get([]byte(keyCurrent)); v != nil {
-			// 坏 JSON 不吞（同 SetKey1FirstSet B-6；否则 keys.Key2=="" 误判"未生成"→ key2 被重置）
-			if e := json.Unmarshal(v, &keys); e != nil {
-				return fmt.Errorf("keys bucket corrupt: %w", e)
-			}
+		// loadKeys 坏 JSON 不吞（同 SetKey1FirstSet B-6；否则 keys.Key2=="" 误判"未生成"→ key2 被重置）。
+		keys, loadErr := loadKeys(tx)
+		if loadErr != nil {
+			return loadErr
 		}
 		if keys.Key2 != "" {
 			result = keys.Key2
 			return nil
 		}
-		k2, err := newID()
+		newKey2, err := newID()
 		if err != nil {
 			return err
 		}
-		keys.Key2 = k2
+		keys.Key2 = newKey2
 		data, err := json.Marshal(keys)
 		if err != nil {
 			return err
@@ -480,7 +504,7 @@ func (s *BBolt) EnsureKey2() (string, error) {
 		if err := kb.Put([]byte(keyCurrent), data); err != nil {
 			return err
 		}
-		result = k2
+		result = newKey2
 		return nil
 	})
 	return result, err
@@ -491,6 +515,74 @@ func (s *BBolt) ResetKeys() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte(bucketKeys)).Delete([]byte(keyCurrent))
 	})
+}
+
+// AuthorizeRead 读端点 key1 准入（CP2，§8/§19）。HTTP 读端点（messages/media/cursor/stream）经 requireKey1 调此。
+//   - true  = key1 已设 且 provided 匹配 → 放行
+//   - false = key1 未设（窗口锁，首注前读端点全拒）或 provided 不匹配/空 → 401
+//   - err   = keys 桶损坏（loadKeys 不吞）→ 500
+//
+// fail-closed：返 bool 零值=false=拒，HTTP 层即使吞 err 也只误拒不绕过（R1 结构性消除）。
+func (s *BBolt) AuthorizeRead(provided string) (bool, error) {
+	var ok bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		keys, loadErr := loadKeys(tx)
+		if loadErr != nil {
+			return loadErr
+		}
+		if keys.Key1 == "" {
+			ok = false // 窗口未设：读端点锁（§19，防 share URL 静默拉历史），首注后自动解锁
+			return nil
+		}
+		ok = key1Matches(provided, keys.Key1)
+		return nil
+	})
+	return ok, err
+}
+
+// ResolveRegisterKey register 的 key1 三态决策 + first-set（CP2，§8/§9）。handleAPIRegister 调此。
+// 单 Update 事务内 read-check + first-set（atomic CAS，无 TOCTOU；并发首注 first-set wins 只一个赢）。
+//   - key1 未设（窗口 A）→ first-set(newID) 返 winner，allowed=true（provided 被忽略——server 始终自生成，客户端不选 secret）
+//   - key1 已设 + provided 匹配 → 返 existing，allowed=true（再注册/token 刷新）
+//   - key1 已设 + provided 不匹配/空 → ("", false)（401，防 B 蹭全广播）
+//   - keys 桶损坏 → (..., err)（500）
+//
+// fail-closed：allowed 零值=false=拒。newID 在 store 内（不导出 NewID），与 EnsureKey2 同源对称（R2 消除）。
+func (s *BBolt) ResolveRegisterKey(provided string) (string, bool, error) {
+	var authKey1 string
+	var allowed bool
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		kb := tx.Bucket([]byte(bucketKeys))
+		keys, loadErr := loadKeys(tx)
+		if loadErr != nil {
+			return loadErr
+		}
+		if keys.Key1 == "" {
+			// 窗口 A：first-set（server 生成，与 EnsureKey2 同源用 newID；不导出 NewID）。
+			newKey1, genErr := newID()
+			if genErr != nil {
+				return genErr
+			}
+			keys.Key1 = newKey1
+			data, marshalErr := json.Marshal(keys)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			if putErr := kb.Put([]byte(keyCurrent), data); putErr != nil {
+				return putErr
+			}
+			authKey1 = newKey1
+			allowed = true
+			return nil
+		}
+		// 已设：验 provided（provided 空/错都 false→401）。
+		if key1Matches(provided, keys.Key1) {
+			authKey1 = keys.Key1
+			allowed = true
+		}
+		return nil
+	})
+	return authKey1, allowed, err
 }
 
 // newID 生成随机 hex id（crypto/rand 32 字节 = 256 bit 熵，够唯一；YAGNI 不拉 uuid 库）。
@@ -709,4 +801,32 @@ func (m *Memory) ResetKeys() error {
 	defer m.mu.Unlock()
 	m.keys = model.Keys{}
 	return nil
+}
+
+// AuthorizeRead（Memory 实现，语义同 BBolt；调试/单测用）。
+func (m *Memory) AuthorizeRead(provided string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.keys.Key1 == "" {
+		return false, nil // 窗口未设：锁
+	}
+	return key1Matches(provided, m.keys.Key1), nil
+}
+
+// ResolveRegisterKey（Memory 实现，语义同 BBolt；mu 串行化等价 bbolt 事务 CAS）。
+func (m *Memory) ResolveRegisterKey(provided string) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.keys.Key1 == "" {
+		newKey1, err := newID()
+		if err != nil {
+			return "", false, err
+		}
+		m.keys.Key1 = newKey1
+		return newKey1, true, nil
+	}
+	if key1Matches(provided, m.keys.Key1) {
+		return m.keys.Key1, true, nil
+	}
+	return "", false, nil
 }
