@@ -7,7 +7,14 @@ package pushkit
 import (
 	"fmt"
 	"log"
+
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
 )
+
+// huaweiCategory 华为 notification.category 固定 SUBSCRIPTION（已过审 2026-07-02）。
+// 业务 category（call/sms/verify/...）走 msg.Category → PushKit clickAction.data（CP4），不碰 notification.category。
+// 自用绕频控走 pushOptions.testMessage（CP4 实装），非 category。
+const huaweiCategory = "SUBSCRIPTION"
 
 type Config struct {
 	ProjectID      string `json:"project_id"`       // 华为项目 ID（push API URL 路径用）
@@ -27,22 +34,28 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg}
 }
 
-// Send 向单个 push_token 推一条通知。
-// category：消息分类（自用 testMessage 绕限频；正式 SUBSCRIPTION，已过审 2026-07-02）。
+// Send 推送消息到设备（CP3b 宽签名：收完整 Message + Device）。
+// 宽签名让 pushkit 能用所有字段（url→clickAction.data、msg.Category→业务分类、Ext→未来字段），
+// 鸿蒙 PushKit API 升级（v3→v4）或加新能力 = 改本函数，不动 Pusher 接口（plan「扩展性三层」）。
 //
-// TODO 实现真实推送（移植自 Python 桥）：
+// TODO 实现真实推送（CP4 移植自 Python 桥）：
 //  1. 签 JWT：header {kid, typ:JWT, alg:PS256}、payload {iss:sub_account, aud, iat, exp}（**无 sub**）；
 //     用 private.json 的 RSA 私钥，PS256 签名。
 //  2. JWT 直接当 Authorization: Bearer（**不调 oauth2/v3/token 换 access_token**——旧桥走过这弯路）。
 //  3. POST https://push-api.cloud.huawei.com/v3/{project_id}/messages:send
-//     body: target{token:[pushToken]} + payload{notification{title,body,category,clickAction{actionType:0}} + pushOptions{testMessage:true|false}}
-//     header: push-type:0；成功码 80000000。
-func (c *Client) Send(pushToken, title, body, category string) error {
-	if c.cfg.ProjectID == "" || pushToken == "" {
-		return nil // 调试模式：静默跳过
+//     body: target{token:[dev.PushToken]} + payload{notification{title:msg.Title, body:msg.Body,
+//           category:huaweiCategory, clickAction{actionType:0, data: msg.Category+msg.URL}}
+//           + pushOptions{testMessage:true|false}}
+//     header: push-type:0；成功码 80000000；死 token 80100000/80300007 删（CP4 全局闸门）。
+//
+// CP3 stub：ProjectID 空 / dev.PushToken 空 → 静默跳过（return nil）；否则返 not implemented。
+func (c *Client) Send(msg model.Message, dev model.Device) error {
+	if c.cfg.ProjectID == "" || dev.PushToken == "" {
+		return nil // 调试模式 / 无 token：静默跳过
 	}
-	log.Printf("[pushkit] TODO Send → token=%s title=%q category=%s", mask(pushToken), title, category)
-	return fmt.Errorf("pushkit.Send not yet implemented（待从 Python 桥移植 JWT+v3）")
+	log.Printf("[pushkit] TODO Send → token=%s title=%q cat=%s url=%s",
+		mask(dev.PushToken), msg.Title, msg.Category, msg.URL)
+	return fmt.Errorf("pushkit.Send not yet implemented（待 CP4 从 Python 桥移植 JWT+v3）")
 }
 
 // mask 脱敏 token（日志不泄露全量）。

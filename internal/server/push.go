@@ -1,0 +1,129 @@
+// 原生 /api/v1/push 端点 + 共享 ingest（CP3b）。
+//
+// ingest 是 bark 皮 + 原生 push 共享的"存库+推送"路径（去耦合：不拿 http.ResponseWriter，
+// CP5 WS 也能复用）。fanoutPush 封装"查目标设备 + Pusher.Send"。
+//
+// Pusher 宽签名（Send(msg, dev)）：pushkit 能用所有字段（url→clickAction、category→业务分类、Ext→未来），
+// 鸿蒙 API 升级改 pushkit 内部不动 Pusher 接口（plan「扩展性三层」）。
+package server
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"strings"
+
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
+)
+
+// Pusher 推送能力抽象（CP3b）：server 依赖 interface 非 *pushkit.Client 具体类型，
+// 便于测试 mock（failPusher）+ 未来多平台 adapter（鸿蒙/iOS/安卓，CP4+）。
+// *pushkit.Client 已满足此 interface（Send 宽签名），server.New 传 *pushkit.Client 零改。
+type Pusher interface {
+	Send(msg model.Message, dev model.Device) error
+}
+
+// ingest 存库 + 推送（bark 皮 + 原生 push 共享）。去耦合：不拿 ResponseWriter，CP5 WS 可复用。
+// 返回 (hlc, err)：
+//   - err!=nil && hlc==0 → 存失败（挡，消息没落库，handler 返 500）
+//   - err!=nil && hlc!=0 → 推失败（不挡，消息已落库，handler 返 200 + 留痕）
+//   - err==nil           → 全成功
+//
+// category 空 → 兜底 "default"（bark/native 都走这；bark CP3c 映射后非空不覆盖）。
+func (s *Server) ingest(msg model.Message) (uint64, error) {
+	if msg.Category == "" {
+		msg.Category = "default" // category 兜底（业务 category 值集含 default，§13b）
+	}
+	hlc, err := s.st.SaveMessage(msg) // store 内填 HLC + TS（if TS==0）
+	if err != nil {
+		return 0, err // 存失败：消息没落库，推送无意义——挡
+	}
+	msg.HLC = hlc // 值传递：store 改的是副本，原 msg.HLC 还是 0；回填让 fanoutPush log/未来 CP6 全广播用对 HLC
+	if pushErr := s.fanoutPush(msg); pushErr != nil {
+		return hlc, pushErr // 推失败不挡（消息已落库）——返 pushErr 让 handler 决定响应
+	}
+	return hlc, nil
+}
+
+// fanoutPush 推送：CP3 阶段 msg.TargetUUID 非空 → 查那台 push；空 → 落历史不推（全广播扇出留 CP6）。
+// 推失败返 error（不 panic/fatal）——ingest/handler 据此决定响应；device not found 留痕不报错（消息已落库）。
+func (s *Server) fanoutPush(msg model.Message) error {
+	if msg.TargetUUID == "" {
+		// CP3：无定向目标，暂不推（CP6 改全广播 AllDevices 扇出）。消息已落库，留痕。
+		log.Printf("[push] no target_uuid, saved only (全广播扇出留 CP6) hlc=%d", msg.HLC)
+		return nil
+	}
+	dev, err := s.st.GetDevice(msg.TargetUUID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// 设备未注册——消息已落库，跳过推送但留痕（纪律③ 异常不静默吞）
+		log.Printf("[push] device %s not registered, saved but not pushed", msg.TargetUUID)
+		return nil
+	case err != nil:
+		// GetDevice 内部错（非 NotFound）——返 error 让 handler 知道（消息已落库不挡）
+		log.Printf("[push] GetDevice %s error: %v", msg.TargetUUID, err)
+		return err
+	case dev.PushToken == "":
+		// register 校验 token 非空，理论不触发；留痕防静默 success 假绿
+		log.Printf("[push] device %s empty push token, saved but not pushed", msg.TargetUUID)
+		return nil
+	default:
+		return s.pk.Send(msg, dev)
+	}
+}
+
+// handleAPIPush 原生推送端点（CP3b，Hotify App 主路径）。
+// 套 requireKey1（key1 域内准入）+ JSON body → model.Message → ingest。
+//
+// Request:  Authorization: Bearer {key1} + JSON {category?, title?, body?, from?, recipient?, target_uuid?, media_ids?, url?}
+// Response 成功: {code:200, message:"success"}（apiResp，无 timestamp——native 干净；不回显 HLC，走 /messages 拉）
+// Response 错误: {code:400/401/500, message}
+func (s *Server) handleAPIPush(w http.ResponseWriter, r *http.Request) {
+	// body limit ~1MB（防 OOM/恶意灌，plan CP3b 输入校验）
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	// Content-Type 校验（功能审 P2-1：拒 text/plain 等非 JSON 防误解析；bark 留 CP3c Content-Type 分派）
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		writeAPIError(w, http.StatusUnsupportedMediaType, "content-type must be application/json")
+		return
+	}
+
+	var body struct {
+		Category   string   `json:"category"`
+		Title      string   `json:"title"`
+		Body       string   `json:"body"`
+		From       string   `json:"from"`
+		Recipient  string   `json:"recipient"`
+		TargetUUID string   `json:"target_uuid"`
+		MediaIDs   []string `json:"media_ids"`
+		URL        string   `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	// 必填：title/body/media_ids 至少一个（主路径该有内容；空消息兜底是 bark 兼容行为）
+	if body.Title == "" && body.Body == "" && len(body.MediaIDs) == 0 {
+		writeAPIError(w, http.StatusBadRequest, "at least one of title/body/media_ids required")
+		return
+	}
+	// category 不校验值集（server 哑，端侧 profile infer 兜底未知值）；Ext 原生不填（bark 才留底）
+
+	msg := model.Message{
+		Category:   body.Category,
+		Title:      body.Title,
+		Body:       body.Body,
+		From:       body.From,
+		Recipient:  body.Recipient,
+		TargetUUID: body.TargetUUID,
+		MediaIDs:   body.MediaIDs,
+		URL:        body.URL,
+		// TS: store 内填（if ==0）
+	}
+
+	hlc, err := s.ingest(msg)
+	// ⚠️ 200 不代表推送成功：code:200 + message="saved but push failed: ..." 表消息已落库但推送失败。
+	// client 必须查 message 不能只看 code（功能审 P2-2；完整错误码文档排 CP6 client 契约）。
+	writeIngestResult(w, hlc, err, false) // native（无 timestamp）
+}

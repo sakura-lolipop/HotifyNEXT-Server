@@ -38,9 +38,7 @@ func (s *Server) requireKey1(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ok, err := s.st.AuthorizeRead(extractKey1(r))
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"code": 500, "message": "auth check failed: " + err.Error(),
-			})
+			writeAPIError(w, http.StatusInternalServerError, "auth check failed: "+err.Error())
 			return
 		}
 		if !ok {
@@ -51,9 +49,7 @@ func (s *Server) requireKey1(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// unauthorized 401 + JSON envelope（鉴权失败统一出口，不散落 http.Error）。
+// unauthorized 401 + JSON envelope（鉴权失败统一出口；native 无 timestamp）。
 func unauthorized(w http.ResponseWriter, msg string) {
-	writeJSON(w, http.StatusUnauthorized, map[string]any{
-		"code": 401, "message": msg,
-	})
+	writeAPIError(w, http.StatusUnauthorized, msg)
 }

@@ -10,7 +10,9 @@
 |---|---|---|---|
 | **CP3 开头** | TD-3（envelope 类型化） | 先建 `apiResp` + `writeAPIError` 再写 CP3 新端点 | CP2 已 5 处临界，CP3 端点（`/api/v1/messages`/`push`/`media`）翻倍；状态码双写是漏改源——边写边欠新债 |
 | **CP3 流里** | TD-4（410 双胞胎 + device helper）+ **TD-5（bark.go 9 缺口，CP3 bark 兼容本职）** | TD-4 随 `/read` 删 + device 写方法抽 `mutateDevice`；**TD-5 = CP3 bark 兼容层按 `bark.md` §4 重写（含 2 段路径 bug）** | TD-5 非 cleanup、是 CP3 本职，列此追踪 9 缺口 |
-| **Phase 2 cleanup 批次** | TD-1（文件拆分）+ TD-2（saveKeys DRY） | CP3 端点稳定后 | TD-1 前置依赖 CP3（现在拆=churn）；静态 DRY 不 compound，批处理省 context-switch，对齐 legacy hotify"M3 后 cleanup"节奏 |
+| **Phase 2 cleanup 批次** | TD-1（文件拆分）+ TD-2（saveKeys DRY）+ TD-10（SaveMessage 签名）+ TD-11（pk→pusher 字段名） | CP3 端点稳定后 | TD-1 前置依赖 CP3（现在拆=churn）；静态 DRY/命名不 compound，批处理省 context-switch |
+| **MVP 后工程化批次** | TD-6（CI + golangci-lint）+ TD-7（版本注入） | CP6（Phase 1 MVP 收尾）后 | 迭代期 churn 快 CI 噪声大反碍事；MVP 稳定后上自动门防回归 + 分发排错要版本号（2026-07-21 架构评估记） |
+| **CP6 批次** | TD-8（client 契约文档）+ TD-9（fanoutPush sentinel） | CP6（部署就绪） | client 接 API 要错误码契约文档；fanoutPush 全广播扇出前补 sentinel 防五分支语义糊（CP3b 屎山审 P2-3） |
 
 **不清在 CP2**：CP2 已验证完成（`go test ./...` + `go vet` 全绿），混入重构违反"不混改"纪律；TD-1 现在 do 不了（CP3 端点重排依赖）；TD-3 在 CP3 开头做时上下文一样热（CP3 就是写端点、碰 envelope 的时候），现在做无 warmth 优势反冒"改坏已验证代码"险。
 
@@ -40,12 +42,49 @@
 - **触发**：CP3 端点重排时一并做。
 
 ### TD-4 410 双胞胎 handler + device patch-update helper（屎山审查 #1/#4，2026-07-21）
-- **现状**：`handleMarkRead`/`handleReadSet` 是逐字符相同的 410 handler；`RegisterDevice`/`TouchDeviceSeen` 的 `Get→Unmarshal→改→Marshal→Put` 骨架重复。
-- **修**：410 双胞胎合一（Go 1.22 一个 handler 挂 POST+GET 两 pattern）；device 写方法加 `mutateDevice(tx, uuid, func(*model.Device))` helper（CP3 加 `UpdateDeviceName`/`ClearPushToken` 等时抽）。
-- **触发**：CP3（`/read` 路由删除 + 新 device 写方法时）。
+- **410 合一 ✅（CP3a 完成）**：`handleMarkRead`/`handleReadSet` 双胞胎合一成 `handleReadDeprecated`（Go 1.22 `/read/{key}` 匹配全方法）。**保留路由返 410 不删**——CP3a 审查 P3 发现删了会让旧 App /read 落 bark 兜底（read 当 device_key）灌空消息；410 给明确废弃信号。
+- **mutateDevice helper ⬜（延 Phase 2）**：`RegisterDevice`/`TouchDeviceSeen` 的 `Get→Unmarshal→改→Marshal→Put` 骨架重复，待加 `UpdateDeviceName`/`ClearPushToken` 等新 device 写方法时抽 `mutateDevice(tx, uuid, func(*model.Device))`；CP3 未加新 device 写方法 → 延 Phase 2 cleanup。
 
 ### TD-5 bark.go 9 缺口（CP3 bark 兼容层本职，2026-07-21）
 - **现状**：`internal/bark/bark.go`（CP1-temp 最小实现）只解析路径式 + JSON {title,body}、category 硬编 default。`bark.md` §4.6 依 bark-server 源码列 9 缺口：①缺 query/form 参数合并 ②缺字段全集（level/group/call/url/image/sound/icon/…）③category 硬编 default ④缺 4 段式 `/{key}/{title}/{subtitle}/{body}` ⑤响应缺 timestamp ⑥**bug：缺 2 段式 `/{key}/{body}`——现 `len(segs)>=3` 把 GET `/{key}/body` 的 body 当 title** ⑦缺 Content-Type 分派 ⑧缺字段名小写化 ⑨缺 URL 解码。
 - **性质**：**CP3 bark 兼容层的实装范围（非 Phase 2 cleanup）**——CP3 按 `bark.md` §4 重写 bark.go 全部补齐；#6 bug 也 CP3 修（CP1-temp 不完整 bark 是预期的，不单独 hotfix）。
 - **触发**：CP3（bark+原生双入口归一 PushSpec）。
 - **依据**：`bark.md` §4.6（bark-server 源码出处 `route_push.go`/`apns.go`/`router.go`）。
+
+### TD-6 CI + golangci-lint（2026-07-21 架构评估记）
+- **现状**：`go test ./...` + `go vet` 手动跑；无 `.github/workflows`；无 linter 配置。
+- **为什么 MVP 后才加**：迭代期代码 churn 快，CI 门噪声大反碍事；MVP 稳定后上自动门防回归才划算。
+- **怎么修**：GitHub Actions（`go test` + `go vet` + build 交叉编译矩阵 GOOS/GOARCH）+ golangci-lint（启用 errcheck/govet/staticcheck/unused）。
+- **errcheck 定位**：**防漏第二道保险**，不是根除手段。返回值不吞的根除靠写代码纪律（CLAUDE.md ④，CP1/CP2/CP3 实现时已守——见 plan「CP3 实现硬纪律」）——人难免漏一个 `_ =`，errcheck 自动抓兜底。别把"CI 抓吞错"当借口放松写代码时的纪律。
+- **触发**：CP6（Phase 1 MVP 收尾）后第一批。
+
+### TD-7 版本注入（2026-07-21 架构评估记）
+- **现状**：无 version/commit；bark-server `/info` 返 `{version,build,arch,commit}`（route_misc.go），Hotify 无。
+- **怎么修**：`go build -ldflags "-X main.version=... -X main.commit=$(git rev-parse --short HEAD)"` + 加 `/info` 端点对齐 bark-server。分发 release / 排错（用户报 bug 知道跑哪个版本）用。
+- **触发**：分发起（CI 发 release 时）/ CP6 后。
+
+### TD-8 client 契约文档（错误码表，2026-07-21 CP3b 功能审 P2-2 + 用户提）
+- **现状**：错误响应散在代码（writeAPIError/writeBark + message 常量 msgSaveFailed/msgPushFailed/msgSuccess），无 client 文档。client 解析响应排查问题缺契约。
+- **关键坑**：**200≠推送成功**——`code:200 + message="saved but push failed: ..."` 表消息已落库但推送失败，client 只看 code 会误判（push.go 注释已标）。
+- **怎么修**：CP6 写完整 client 契约（所有端点 + 错误码表 400/401/404/405/410/415/500 + message + 字段 + 请求格式），放 NEXT-Server.md §2 扩。
+- **触发**：CP6（部署就绪，client 接 API 时）。
+
+### TD-9 fanoutPush sentinel error（2026-07-21 CP3b 屎山审 P2-3）
+- **现状**：fanoutPush 五分支返 nil/err 靠注释区分语义（no-target/device-not-found/空-token 留痕 nil vs 内部错 err），无 sentinel。handler 无法区分"合理留痕"vs"真出错"。
+- **怎么修**：CP6 全广播扇出前，fanoutPush 返 sentinel（ErrDeviceNotFound/ErrNoTarget）或结构体，让 handler/运维区分。CP6 加全广播分支会让 switch 从 4→5+ case，不补会糊。
+- **触发**：CP6（全广播扇出前必须）。
+
+### TD-10 SaveMessage 签名（2026-07-21 CP3b 屎山审 P3-1）
+- **现状**：`SaveMessage(msg) (uint64, error)` 返 hlc 不返 msg，调用方手动 `msg.HLC = hlc` 回填（push.go ingest，值传递根因——store 改副本）。
+- **怎么修**：`SaveMessage(msg *model.Message) error` 或 `(model.Message, error)` 返刷新后的 msg。
+- **触发**：CP5/CP6 refactor（跨 CP store 签名变更）。
+
+### TD-11 pk→pusher 字段名（2026-07-21 CP3b 屎山审 P3-6）
+- **现状**：`Server.pk` 字段名偏紧（2 字母），`pusher` 更可读（8 处引用）。
+- **触发**：Phase 2 cleanup（改名机械，批处理）。
+
+## 按需清单（触发条件强，不单独成 TD，免死债）
+
+- **`cmd/` 布局** —— 加 reset-key CLI / 多二进制时升级（当前单 main.go 在根够用）。
+- **env var 配置（12-factor）** —— 上 serverless/云函数时加（当前 config.json 单机自托管够）。
+- **OpenAPI/proto 契约** —— 跨端 / 对外开放时硬契约（当前单客户端自用、NEXT-Server.md §2 软文档维持够）。

@@ -1,4 +1,5 @@
-// 数据模型：设备、消息、媒体、游标、密钥、归一中间结构。
+// 数据模型：设备、消息、媒体、游标、密钥。
+// CP3b：砍 PushSpec 归一中间层（CP1 死代码，零调用方）——bark 解析直出 Message + 原生 JSON 直映射 Message，共享 ingest。
 //
 // 重写对齐 NEXT 架构（docs/NEXT-Server.md）：
 //   - uuid 路由（替代旧 device_key 当鉴权；鉴权归 key1，uuid 回归寻址，§7/§8）
@@ -37,29 +38,17 @@ type Media struct {
 // HLC 是唯一标识 + 排序 key + 补漏高水位 + 游标基准（§7，全用 HLC 不用自增 id/裸 ts）。
 // Body（文字）与 MediaIDs（附件引用）并列——支持"纯文字"(MediaIDs=nil)/"文字+图"([id])/"多图"([id1,id2])。
 type Message struct {
-	HLC        uint64   `json:"hlc,string"`          // HLC（pt+counter pack）；bbolt msgs 桶 big-endian key；json string 防客户端 Number 精度（2^53 上限，HLC 实际值远超）
-	From       string   `json:"from,omitempty"`      // 发送方自报（跨户；域内空）——全局 key2 下无法可靠区分对端身份，安全上不依赖（§7/§11）
-	Recipient  string   `json:"recipient,omitempty"` // 接收方自报（跨户 peer 标识）——§11 按 sender+recipient 分组对话线程；与 TargetUUID 正交（后者域内哪台设备，前者跨户哪个 peer）
-	Category   string   `json:"category"`            // 业务 category（call/sms/verify/app_notify/history/default，§13b）；落不上走 default
-	Title      string   `json:"title,omitempty"`
-	Body       string   `json:"body,omitempty"`        // 文字内容（与 MediaIDs 并列，非二选一）
-	TS         int64    `json:"ts"`                    // 物理时间戳 ns（展示用）；补漏靠 HLC 不靠它（HLC 单调，ts 可能 NTP 回退）
-	MediaIDs   []string `json:"media_ids,omitempty"`   // media_id 引用数组：nil=纯文字 / [id]=一附件 / [id1,id2]=多附件
-	TargetUUID string   `json:"target_uuid,omitempty"` // 域内定向设备 uuid（少用，私密单发）；空=全广播（§7）
-}
-
-// PushSpec 归一中间结构（三格式 bark/gotify/原生 → PushSpec，§6 方案 C 主从原则）。
-// CP1 只定义 struct；归一逻辑（bark level/group/call → category 等）在 CP3。
-// 原生 /api/v1/push = 主（category/media 一等字段完整）；bark /{key} = 从（降级入口，尽力映射）。
-type PushSpec struct {
-	Category   string // 业务 category（原生一等；bark 从 level/group/call 映射，命中不了靠端侧 infer 兜底）
-	Title      string
-	Body       string
-	From       string   // 跨户自报
-	Recipient  string   // 跨户 peer 标识
-	TargetUUID string   // 域内定向
-	MediaIDs   []string // 原生端点多附件（bark 单 image 归一成长度 1）
-	TS         int64
+	HLC        uint64            `json:"hlc,string"`          // HLC（pt+counter pack）；bbolt msgs 桶 big-endian key；json string 防客户端 Number 精度（2^53 上限，HLC 实际值远超）
+	From       string            `json:"from,omitempty"`      // 发送方自报（跨户；域内空）——全局 key2 下无法可靠区分对端身份，安全上不依赖（§7/§11）
+	Recipient  string            `json:"recipient,omitempty"` // 接收方自报（跨户 peer 标识）——§11 按 sender+recipient 分组对话线程；与 TargetUUID 正交（后者域内哪台设备，前者跨户哪个 peer）
+	Category   string            `json:"category"`            // 业务 category（call/sms/verify/app_notify/history/default，§13b）；落不上走 default
+	Title      string            `json:"title,omitempty"`
+	Body       string            `json:"body,omitempty"`        // 文字内容（与 MediaIDs 并列，非二选一）
+	TS         int64             `json:"ts"`                    // 物理时间戳 ns（展示用）；补漏靠 HLC 不靠它（HLC 单调，ts 可能 NTP 回退）
+	MediaIDs   []string          `json:"media_ids,omitempty"`   // media_id 引用数组：nil=纯文字 / [id]=一附件 / [id1,id2]=多附件
+	TargetUUID string            `json:"target_uuid,omitempty"` // 域内定向设备 uuid（少用，私密单发）；空=全广播（§7）
+	URL        string            `json:"url,omitempty"`         // CP3b: 点击跳转 URL（bark url / 原生 url → PushKit clickAction.data，CP4 用）
+	Ext        map[string]string `json:"ext,omitempty"`         // CP3b: bark 未映射字段留底（icon/copy/sound 等），鸿蒙演进备查；原生 push 不填
 }
 
 // Cursor 阅读游标（覆盖式单值，不跑 TTL，§13）。

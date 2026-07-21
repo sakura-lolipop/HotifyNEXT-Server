@@ -4,7 +4,6 @@ package server
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,14 +69,28 @@ func TestSmoke_RegisterPushHistory(t *testing.T) {
 	}
 
 	// 2) bark push（路径式 /{key}/标题/内容）——pushkit stub push 失败，但消息落库
+	// CP3a：bark 响应带 timestamp（bark.md §1.5，writeBark），验 code/message/timestamp 三字段。
 	resp, err = http.Post(ts.URL+"/dev1/标题/内容测试", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	var pushResp struct {
+		Code      int    `json:"code"`
+		Message   string `json:"message"`
+		Timestamp int64  `json:"timestamp"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&pushResp); err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
-	if !strings.Contains(string(body), "saved") && !strings.Contains(string(body), "success") {
-		t.Fatalf("push resp unexpected: %s", body)
+	if pushResp.Code != 200 {
+		t.Fatalf("push code=%d msg=%q (want 200)", pushResp.Code, pushResp.Message)
+	}
+	if !strings.Contains(pushResp.Message, "saved") && pushResp.Message != "success" {
+		t.Errorf("push msg unexpected: %q", pushResp.Message)
+	}
+	if pushResp.Timestamp == 0 {
+		t.Error("bark resp missing timestamp (bark.md §1.5, writeBark 应填)")
 	}
 
 	// 3) history 拉得到（/messages 套了 requireKey1，带 key1 头）
@@ -117,7 +130,8 @@ func TestSmoke_RegisterPushHistory(t *testing.T) {
 	}
 }
 
-// TestSmoke_ReadSetDeprecated 验 §14 砍 read set → 返 410 Gone（防旧 App 404 噪声）。
+// TestSmoke_ReadSetDeprecated 验 §14 砍 read set → 410 Gone（防旧 App 落 bark 兜底灌空消息）。
+// TD-4：/read 路由保留返 410（合一 handler，不删），给旧 App 明确废弃信号。
 func TestSmoke_ReadSetDeprecated(t *testing.T) {
 	ts, _, _ := newSmokeServer(t)
 	resp, err := http.Get(ts.URL + "/read/dev1")
