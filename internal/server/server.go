@@ -42,8 +42,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /register", s.handleRegister)                    // 旧字段兼容（无 key1）
 	mux.HandleFunc("GET /messages/{key}", s.requireKey1(s.handleHistory)) // 读端点 key1 准入（CP2，§19）
 	mux.HandleFunc("/read/{key}", s.handleReadDeprecated) // §14 砍 read set → 410（TD-4 合一：保留路由避免旧 App 落 bark 兜底灌空消息）
-	mux.HandleFunc("/api/", s.handleNotFound)   // /api/ 子树兜底 404（POST /api/v1/* 精确优先；防失配 method 落 bark 兜底污染 msgs——CP3b 功能审 #15）
-	mux.HandleFunc("/share/", s.handleNotFound) // /share/ 子树兜底 404（CP6 跨户端点前缀，同防）
+	mux.HandleFunc("/api/", s.handleNotFound)      // /api/ 子树兜底 404（POST /api/v1/* 精确优先；防失配 method 落 bark 兜底污染 msgs——CP3b 功能审 #15）
+	mux.HandleFunc("/share/", s.handleNotFound)    // /share/ 子树兜底 404（CP6 跨户端点前缀，同防）
+	mux.HandleFunc("/messages/", s.handleNotFound) // /messages/ 子树兜底 404（GET /messages/{key} 精确优先；防 POST/PUT 等 method 失配落 bark 兜底建 TargetUUID="messages" 污染——CP3c 跨层审）
+	mux.HandleFunc("/register/", s.handleNotFound) // /register/ 子树兜底 404（POST /register 精确优先；防 /register/xxx 子路径落 bark 兜底建 TargetUUID="register" 污染——CP3c 跨层审）
 	mux.HandleFunc("/", s.handleBark) // 兜底 bark 入口 /{key}...（§鉴权表"域内无"= design：bark 零摩擦卖点，写开放靠部署层 LAN 兜，非漏接；与 §19 读端点 key1 准入正交）
 	return logReq(mux)
 }
