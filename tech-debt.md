@@ -12,6 +12,7 @@
 | **CP3 流里** | TD-4（410 双胞胎 + device helper）+ **TD-5（bark.go 9 缺口，CP3 bark 兼容本职）** | TD-4 随 `/read` 删 + device 写方法抽 `mutateDevice`；**TD-5 = CP3 bark 兼容层按 `bark.md` §4 重写（含 2 段路径 bug）** | TD-5 非 cleanup、是 CP3 本职，列此追踪 9 缺口 |
 | **Phase 2 cleanup 批次** | TD-1（文件拆分）+ TD-2（saveKeys DRY）+ TD-10（SaveMessage 签名）+ TD-11（pk→pusher 字段名） | CP3 端点稳定后 | TD-1 前置依赖 CP3（现在拆=churn）；静态 DRY/命名不 compound，批处理省 context-switch |
 | **MVP 后工程化批次** | TD-6（CI + golangci-lint）+ TD-7（版本注入） | CP6（Phase 1 MVP 收尾）后 | 迭代期 churn 快 CI 噪声大反碍事；MVP 稳定后上自动门防回归 + 分发排错要版本号（2026-07-21 架构评估记） |
+| **CP4 批次** | TD-12（msg.URL 协议白名单） | CP4（pushkit 搬，接 clickAction 前） | CP3c 两边（bark+native）裸收 url 未校验；CP4 pushkit 喂 clickAction.data 前必须加协议白名单（http/https/app scheme）防 javascript:/file: 跳转（XSS/钓鱼/本地文件泄露，CP3c 对抗审 B P2） |
 | **CP6 批次** | TD-8（client 契约文档）+ TD-9（fanoutPush sentinel） | CP6（部署就绪） | client 接 API 要错误码契约文档；fanoutPush 全广播扇出前补 sentinel 防五分支语义糊（CP3b 屎山审 P2-3） |
 
 **不清在 CP2**：CP2 已验证完成（`go test ./...` + `go vet` 全绿），混入重构违反"不混改"纪律；TD-1 现在 do 不了（CP3 端点重排依赖）；TD-3 在 CP3 开头做时上下文一样热（CP3 就是写端点、碰 envelope 的时候），现在做无 warmth 优势反冒"改坏已验证代码"险。
@@ -82,6 +83,13 @@
 ### TD-11 pk→pusher 字段名（2026-07-21 CP3b 屎山审 P3-6）
 - **现状**：`Server.pk` 字段名偏紧（2 字母），`pusher` 更可读（8 处引用）。
 - **触发**：Phase 2 cleanup（改名机械，批处理）。
+
+### TD-12 msg.URL 协议白名单（2026-07-21 CP3c 对抗审 B P2）
+- **现状**：`msg.URL`（bark `url` + 原生 `url` 两边都收）**无协议白名单 / 长度上限 / host 校验**。CP4 计划把 `msg.URL` 喂给 PushKit `clickAction.data`——鸿蒙端点通知跳转。
+- **风险**：`javascript:` 协议（webview 场景 XSS）/ `file://` `content://`（本地文件泄露）/ `http://attacker.com`（钓鱼）。鸿蒙 PushKit clickAction 的 URL 处理语义 CP4 待验。
+- **为什么 CP3c 不修**：CP3c 是解析层（bark/native 收 URL 进 Message.URL），URL 校验是推送层（CP4 pushkit 喂 clickAction 时）。clickAction 语义未定（CP4 验），现在加白名单可能错（万一鸿蒙支持自定义 app scheme）。归 CP4 验证后定。
+- **怎么修**：CP4 pushkit 接 `msg.URL` 前加协议白名单（http/https/自定义 app scheme 才放行，长度 ≤ 2048），bark 和 native 共用同一 sanitize helper（放 response.go 或新建 sanitize.go）。
+- **触发**：CP4（pushkit 搬 legacy `hotify-bridge/go/push.go`，接 clickAction 时）。
 
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 

@@ -29,9 +29,8 @@ HotifyServer/
     config/            配置加载
     model/             Device / Message(HLC) / Cursor / Profile 类型
     database/          bbolt 存储（HLC key + 空间阈值 FIFO + media metadata；移植自 bark-server，MIT）
-    bark/              bark 协议入口（/{key}，归一化进内部 PushSpec）
-    pushkit/           华为 Push Kit 客户端（JWT Bearer + v3，移植自 legacy 桥）
-    server/            HTTP 装配 + 路由（Go 1.22 ServeMux）+ 鉴权中间件（key1/key2）
+    pushkit/           华为 Push Kit 客户端（JWT Bearer + v3，移植自 legacy 桥；CP3b Send 宽签名 stub，CP4 真接）
+    server/            HTTP 装配 + 路由（Go 1.22 ServeMux）+ 鉴权（key1/key2）+ bark 兼容皮（CP3a 搬进，砍独立 bark 包）+ 共享 ingest（CP3b，bark+native 共用存推）
 ```
 
 ## 路由
@@ -39,6 +38,7 @@ HotifyServer/
 | 方法 路径 | 鉴权 | 作用 |
 |---|---|---|
 | `POST /api/v1/register` | key1（首注 first-set 不带） | 设备注册：uuid+platform+token+type+key_ver；首设备设 key1 |
+| `POST /api/v1/push` | key1 | 原生推送（{category,title,body,url,media_ids,...} → Message → 共享 ingest，CP3b） |
 | `GET /api/v1/messages?since=&limit=` | key1 | 历史分页（HLC since，新→旧） |
 | `GET /api/v1/messages/{hlc}` | key1 | 取单条 |
 | `POST /media` / `GET /media/{id}` | key1 | 媒体上传/取（blob 文件系统 + metadata） |
@@ -47,9 +47,9 @@ HotifyServer/
 | `GET /profile` | **key2** | 拉对端 profile（icon+别名） |
 | `POST /share/{key2}` | key2 | 跨户投递（{category,title,body,from,media,target}） |
 | `WS /stream` | key1 + uuid | 实时推：新消息 + profile_update |
-| `ANY /{key}...` | 域内无 | bark 兼容皮（POST JSON / 路径式 / GET） |
+| `ANY /{key}...` | 域内无 | bark 兼容皮（POST JSON / 路径式 / GET）；空 content 400 拒（CP3c，跟原生 push 必填对称） |
 
-ServeMux 更具体优先：`/api/v1/*`、`/share/*` 显式路由优于 `/` 兜底；bark 入口走 `/` 自解析首段为 device_key（UUID 与 "api"/"share" 撞不上）。
+ServeMux 更具体优先：`/api/v1/*`、`/share/*`、`/messages/*`、`/register/*` 显式路由优于 `/` 兜底；bark 入口走 `/` 自解析首段为 device_key（UUID 与 "api"/"share"/"messages"/"register" 撞不上）。失配 method（如 `POST /messages/abc`、`GET /api/v1/push`）落 `/api/` `/share/` `/messages/` `/register/` 子树 → 404（防落 bark 兜底建 `TargetUUID="messages"` 等空消息污染 msgs，CP3b/c 跨层审）。
 
 ## 存储：BBolt + HLC
 

@@ -47,8 +47,8 @@ type Message struct {
 	TS         int64             `json:"ts"`                    // 物理时间戳 ns（展示用）；补漏靠 HLC 不靠它（HLC 单调，ts 可能 NTP 回退）
 	MediaIDs   []string          `json:"media_ids,omitempty"`   // media_id 引用数组：nil=纯文字 / [id]=一附件 / [id1,id2]=多附件
 	TargetUUID string            `json:"target_uuid,omitempty"` // 域内定向设备 uuid（少用，私密单发）；空=全广播（§7）
-	URL        string            `json:"url,omitempty"`         // CP3b: 点击跳转 URL（bark url / 原生 url → PushKit clickAction.data，CP4 用）
-	Ext        map[string]string `json:"ext,omitempty"`         // CP3b: bark 未映射字段留底（icon/copy/sound 等），鸿蒙演进备查；原生 push 不填
+	URL        string            `json:"url,omitempty"`         // CP3b: 点击跳转 URL（bark url / 原生 url → PushKit clickAction.data，CP4 用）；CP3c 两边裸收未校验，协议白名单延 CP4（TD-12）
+	Ext        map[string]string `json:"ext,omitempty"`         // CP3b/c bark 未映射字段留底（扩展性三层之数据层）。留底纪律三类：一等字段（title/body/category含call/group归一/url/media_ids）强类型；Ext 留底无映射目标（subtitle/image/icon/copy/autoCopy/level+未知兜底）；真丢（sound/badge/volume端侧profile + ciphertext/iv/isArchive/ttl §9§14）。level 不映射 category（语义正交）；原生 push 不填 Ext
 }
 
 // Cursor 阅读游标（覆盖式单值，不跑 TTL，§13）。
