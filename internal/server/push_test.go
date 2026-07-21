@@ -220,19 +220,20 @@ func TestAPIPush_PushFailNotBlock(t *testing.T) {
 	}
 }
 
-// TestAPIPush_DeviceNotFound target_uuid 查不到 → 落历史不推 + 200 success（fanoutPush ErrNotFound 留痕不报错）。
+// TestAPIPush_DeviceNotFound target_uuid 查不到 → **400 不落库**（CP3c 跨审修正：从根杀随便编 key 灌库）。
+// 攻击者必须知道真实 uuid 才能灌（2^128 枚举不可能）；device not found 不落库（对齐 bark-server key 无效 400）。
 func TestAPIPush_DeviceNotFound(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
 	key1 := registerFirstSet(t, ts, "dev1")
 
 	resp, r := apiPush(t, ts.URL, key1, `{"title":"t","body":"b","target_uuid":"ghost"}`)
 	defer resp.Body.Close()
-	if r.Code != 200 || r.Message != "success" {
-		t.Fatalf("device not found: code=%d msg=%q (want 200 success, 落历史不推)", r.Code, r.Message)
+	if resp.StatusCode != http.StatusBadRequest || r.Code != 400 {
+		t.Fatalf("device not found: status=%d code=%d (want 400, 不落库)", resp.StatusCode, r.Code)
 	}
 	msgs, _ := bb.MessagesSince(0, 10)
-	if len(msgs) != 1 {
-		t.Errorf("msgs: %d (want 1, device not found 也落历史)", len(msgs))
+	if len(msgs) != 0 {
+		t.Errorf("device not found 不该落库: %d (want 0, 从根杀灌库)", len(msgs))
 	}
 }
 
@@ -365,8 +366,8 @@ func TestAPIPush_RealPushkitFail(t *testing.T) {
 	}
 }
 
-// TestBark_DeviceNotFound bark /unknown-key/... → device not found 留痕 + 200 + 落库（漏测 #5/#6）。
-// 验 bark 接 ingest 后 device not found 行为（fanoutPush ErrNotFound 分支，bark 响应带 timestamp）。
+// TestBark_DeviceNotFound bark /unknown-key/... → **400 不落库**（CP3c 跨审修正：从根杀随便编 key 灌库）。
+// bark key 当 device_key 路由，随便编 key 无设备 → 不落库（对齐 bark-server key 无效 400）。
 func TestBark_DeviceNotFound(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
 	resp, err := http.Post(ts.URL+"/unknown-key/标题/内容", "application/json", nil)
@@ -376,12 +377,12 @@ func TestBark_DeviceNotFound(t *testing.T) {
 	var r barkResp // bark 响应带 timestamp
 	json.NewDecoder(resp.Body).Decode(&r)
 	resp.Body.Close()
-	if r.Code != 200 {
-		t.Errorf("bark device not found: code=%d (want 200)", r.Code)
+	if r.Code != 400 {
+		t.Errorf("bark device not found: code=%d (want 400, 不落库)", r.Code)
 	}
 	msgs, _ := bb.MessagesSince(0, 10)
-	if len(msgs) != 1 || msgs[0].TargetUUID != "unknown-key" || msgs[0].Body != "内容" {
-		t.Errorf("bark msg 落库: %+v", msgs)
+	if len(msgs) != 0 {
+		t.Errorf("bark device not found 不该落库: %d (want 0, 从根杀灌库)", len(msgs))
 	}
 }
 
@@ -414,8 +415,8 @@ func TestAPIPush_SaveFail(t *testing.T) {
 	}
 }
 
-// TestAPIPush_GetDeviceErr fanoutPush GetDevice 内部错（非 ErrNotFound）→ 推失败 200（漏测 #2）。
-// errGetDeviceStore：SaveMessage 真（落库），GetDevice 注入 err。
+// TestAPIPush_GetDeviceErr ingest GetDevice 内部错（非 ErrNotFound）→ 挡 500 不落库（CP3c 跨审修正：GetDevice 前置）。
+// errGetDeviceStore：GetDevice 注入 err（非 ErrNotFound）。GetDevice 在 SaveMessage 前，故障挡（不落库）。
 func TestAPIPush_GetDeviceErr(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "getdev.db")
@@ -431,12 +432,12 @@ func TestAPIPush_GetDeviceErr(t *testing.T) {
 	key1 := registerFirstSet(t, ts, "dev1")
 	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
 	defer resp.Body.Close()
-	if r.Code != 200 || !strings.Contains(r.Message, msgPushFailed) {
-		t.Errorf("getdevice err: code=%d msg=%q (want 200 + push failed)", r.Code, r.Message)
+	if resp.StatusCode != http.StatusInternalServerError || r.Code != 500 {
+		t.Errorf("getdevice err: status=%d code=%d (want 500, GetDevice 故障挡)", resp.StatusCode, r.Code)
 	}
 	msgs, _ := bb.MessagesSince(0, 10)
-	if len(msgs) != 1 {
-		t.Errorf("msgs: %d (want 1, 存成功落库)", len(msgs))
+	if len(msgs) != 0 {
+		t.Errorf("getdevice err 不该落库: %d (want 0, GetDevice 前置挡)", len(msgs))
 	}
 }
 

@@ -28,9 +28,15 @@ type Pusher interface {
 
 // ingest 存库 + 推送（bark 皮 + 原生 push 共享）。去耦合：不拿 ResponseWriter，CP5 WS 可复用。
 // 返回 (hlc, err)：
-//   - err!=nil && hlc==0 → 存失败（挡，消息没落库，handler 返 500）
+//   - errors.Is(err, store.ErrNotFound) → **device not found（挡，不落库，handler 返 400）**
+//   - err!=nil && hlc==0 → GetDevice 内部错或存失败（挡，消息没落库，handler 返 500）
 //   - err!=nil && hlc!=0 → 推失败（不挡，消息已落库，handler 返 200 + 留痕）
 //   - err==nil           → 全成功
+//
+// **device not found 不落库**（CP3c 跨审修正，从根杀"随便编 key 灌库"向量）：
+// 定向消息（TargetUUID 非空）先 GetDevice 验存在——不存在直接返 ErrNotFound 不 SaveMessage。
+// 攻击者必须知道真实 uuid 才能灌（uuid 2^128 枚举不可能 + 泄露概率低），灌库向量从根杀。
+// 对齐 bark-server（key 无效返 400 不落库）。全广播（TargetUUID 空，CP6 扇已注册设备）不验，落库。
 //
 // category 空 → 兜底 "default"（bark/native 都走这；bark CP3c 映射后非空不覆盖）。
 func (s *Server) ingest(msg model.Message) (uint64, error) {
@@ -40,42 +46,43 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 	if msg.TS == 0 {
 		msg.TS = time.Now().UnixNano() // 预填 TS（CP3c 跨审 D P1：store SaveMessage 内填 TS 是值传递副本，ingest 的 msg.TS 还是 0 → fanoutPush/Pusher.Send 收 TS=0；CP4 PushKit showBeginTime/归并 key 会全 0）。store if TS==0 不覆盖（已非 0）；与 store 内 nowNs 差几 ns 无害（HLC 单调靠 store 自己的 counter 不靠 msg.TS）
 	}
+	// 定向消息先验设备存在（从根杀随便编 key 灌库）；全广播（TargetUUID 空）跳过验，落库等 CP6 扇
+	var dev model.Device
+	if msg.TargetUUID != "" {
+		var err error
+		dev, err = s.st.GetDevice(msg.TargetUUID)
+		if errors.Is(err, store.ErrNotFound) {
+			return 0, err // device not found → 不落库（handler 400），从根杀灌库向量
+		}
+		if err != nil {
+			return 0, err // GetDevice 内部错 → handler 500
+		}
+	}
 	hlc, err := s.st.SaveMessage(msg) // store 内填 HLC（TS 已在上面预填）
 	if err != nil {
-		return 0, err // 存失败：消息没落库，推送无意义——挡
+		return 0, err // 存失败：消息没落库——挡
 	}
 	msg.HLC = hlc // 值传递：store 改的是副本，原 msg.HLC 还是 0；回填让 fanoutPush log/未来 CP6 全广播用对 HLC
-	if pushErr := s.fanoutPush(msg); pushErr != nil {
+	if msg.TargetUUID == "" {
+		// CP3：无定向目标，落库不推（CP6 改全广播 AllDevices 扇出）。留痕。
+		log.Printf("[push] no target_uuid, saved only (全广播扇出留 CP6) hlc=%d", msg.HLC)
+		return hlc, nil
+	}
+	if pushErr := s.fanoutPush(msg, dev); pushErr != nil {
 		return hlc, pushErr // 推失败不挡（消息已落库）——返 pushErr 让 handler 决定响应
 	}
 	return hlc, nil
 }
 
-// fanoutPush 推送：CP3 阶段 msg.TargetUUID 非空 → 查那台 push；空 → 落历史不推（全广播扇出留 CP6）。
-// 推失败返 error（不 panic/fatal）——ingest/handler 据此决定响应；device not found 留痕不报错（消息已落库）。
-func (s *Server) fanoutPush(msg model.Message) error {
-	if msg.TargetUUID == "" {
-		// CP3：无定向目标，暂不推（CP6 改全广播 AllDevices 扇出）。消息已落库，留痕。
-		log.Printf("[push] no target_uuid, saved only (全广播扇出留 CP6) hlc=%d", msg.HLC)
-		return nil
-	}
-	dev, err := s.st.GetDevice(msg.TargetUUID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		// 设备未注册——消息已落库，跳过推送但留痕（纪律③ 异常不静默吞）
-		log.Printf("[push] device %s not registered, saved but not pushed", msg.TargetUUID)
-		return nil
-	case err != nil:
-		// GetDevice 内部错（非 NotFound）——返 error 让 handler 知道（消息已落库不挡）
-		log.Printf("[push] GetDevice %s error: %v", msg.TargetUUID, err)
-		return err
-	case dev.PushToken == "":
-		// register 校验 token 非空，理论不触发；留痕防静默 success 假绿
+// fanoutPush 推送单台（dev 已在 ingest GetDevice 验存在，签名收 dev 不再重复查）。
+// 推失败返 error（不 panic/fatal）——ingest/handler 据此决定响应。
+// 空 token 留痕不推（防静默 success 假绿；理论 register 校验非空，但 legacy/未来 DELETE 可能造空 token 设备）。
+func (s *Server) fanoutPush(msg model.Message, dev model.Device) error {
+	if dev.PushToken == "" {
 		log.Printf("[push] device %s empty push token, saved but not pushed", msg.TargetUUID)
 		return nil
-	default:
-		return s.pk.Send(msg, dev)
 	}
+	return s.pk.Send(msg, dev)
 }
 
 // handleAPIPush 原生推送端点（CP3b，Hotify App 主路径）。

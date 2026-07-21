@@ -10,10 +10,12 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
 )
 
 // 响应 message 常量（CP3b 屎山审 P2-2：消除跨文件重复 + 测试锁字面量）。
@@ -125,6 +127,11 @@ func writeIngestResult(w http.ResponseWriter, hlc uint64, err error, bark bool) 
 		} else {
 			writeAPIError(w, status, msg)
 		}
+	}
+	// device not found 单判（CP3c 跨审修正：不落库 → handler 400，区别于存失败 500 / 推失败 200）
+	if errors.Is(err, store.ErrNotFound) {
+		writeFn(http.StatusBadRequest, "device not registered")
+		return
 	}
 	switch classifyIngest(hlc, err) {
 	case 0:

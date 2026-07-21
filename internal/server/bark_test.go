@@ -205,6 +205,7 @@ func TestBark_Category_NoHit_Empty(t *testing.T) {
 // TestBark_Category_NoHit_Default_Integrated 集成：无 call/group 落库 → category=default（ingest 兜底）。
 func TestBark_Category_NoHit_Default_Integrated(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
+	registerFirstSet(t, ts, "mykey") // bark key 当 device_key，需注册才落库（device not found 不落库）
 	resp, err := http.Post(ts.URL+"/mykey", "application/json", strings.NewReader(`{"body":"b"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -233,6 +234,7 @@ func TestBark_Field_Lowercase(t *testing.T) {
 // bark-server §1.1 源码无 body 合并，body 含斜杠靠 %2F 编码（非 segs[2:] join）。
 func TestBark_URLDecode_BodyWithSlash(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
+	registerFirstSet(t, ts, "mykey") // bark key 需注册才落库
 	resp, err := http.Get(ts.URL + "/mykey/t/c%2Fd") // 3 段 /key/title/c%2Fd → body="c/d"
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +252,7 @@ func TestBark_URLDecode_BodyWithSlash(t *testing.T) {
 // TestBark_URLDecode_Space path 段含 %20 → 解码成空格。
 func TestBark_URLDecode_Space(t *testing.T) {
 	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
+	registerFirstSet(t, ts, "mykey") // bark key 需注册才落库
 	resp, err := http.Get(ts.URL + "/mykey/hello%20world")
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +269,7 @@ func TestBark_URLDecode_Space(t *testing.T) {
 // TestBark_ResponseTimestamp bark 响应带 timestamp（bark.md §1.5 CommonResp）。
 func TestBark_ResponseTimestamp(t *testing.T) {
 	ts, _ := newPushServer(t, pushkit.New(pushkit.Config{}))
+	registerFirstSet(t, ts, "mykey") // bark key 需注册才落库（否则 device not found 400，验不了 200+timestamp）
 	resp, err := http.Post(ts.URL+"/mykey", "application/json", strings.NewReader(`{"body":"b"}`))
 	if err != nil {
 		t.Fatal(err)
