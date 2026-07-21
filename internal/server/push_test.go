@@ -25,6 +25,22 @@ func (failPusher) Send(model.Message, model.Device) error {
 	return errors.New("push injected failure")
 }
 
+// countingPusher mock Pusher 计数 Send 调用 + 记录收到的 msg/dev（CP3c 跨审 C P1 漏测补：
+// 验 fanoutPush 五分支哪些调 Send 哪些不调——no-target/empty-token 分支应 calls==0）。
+// 非并发用（calls++ 非 thread-safe；并发测用 failPusher）。
+type countingPusher struct {
+	calls   int
+	lastMsg model.Message
+	lastDev model.Device
+}
+
+func (c *countingPusher) Send(msg model.Message, dev model.Device) error {
+	c.calls++
+	c.lastMsg = msg
+	c.lastDev = dev
+	return nil
+}
+
 // errSaveStore 嵌入 *store.BBolt 覆写 SaveMessage 返 err（测 ingest 存失败 → 500，漏测 #3）。
 // 其余方法用 *store.BBolt 的（register 真 first-set key1，push 的 SaveMessage 注入 err）。
 type errSaveStore struct{ *store.BBolt }
@@ -421,5 +437,78 @@ func TestAPIPush_GetDeviceErr(t *testing.T) {
 	msgs, _ := bb.MessagesSince(0, 10)
 	if len(msgs) != 1 {
 		t.Errorf("msgs: %d (want 1, 存成功落库)", len(msgs))
+	}
+}
+
+// TestFanoutPush_NoTarget target_uuid 空 → fanoutPush no-target 分支（log + return nil，不调 Send）。
+// CP3c 跨审 C P1：fanoutPush 五分支零直接覆盖，用计数 Pusher 验 Send 未调用（no-target 隐式覆盖不可靠）。
+func TestFanoutPush_NoTarget(t *testing.T) {
+	pk := &countingPusher{}
+	ts, bb := newPushServer(t, pk)
+	key1 := registerFirstSet(t, ts, "dev1") // first-set 关窗口 A（push 无 target_uuid 仍落库不推）
+
+	resp, r := apiPush(t, ts.URL, key1, `{"body":"b"}`) // 无 target_uuid → no-target 分支
+	defer resp.Body.Close()
+	if r.Code != 200 {
+		t.Errorf("no-target: code=%d msg=%q (want 200)", r.Code, r.Message)
+	}
+	if pk.calls != 0 {
+		t.Errorf("no-target 不该调 Send: calls=%d (want 0)", pk.calls)
+	}
+	msgs, _ := bb.MessagesSince(0, 10)
+	if len(msgs) != 1 {
+		t.Errorf("no-target 应落库（消息已存，只是不推）: %d (want 1)", len(msgs))
+	}
+}
+
+// TestFanoutPush_EmptyToken target_uuid 设备存在但 token 空 → fanoutPush empty-token 分支（留痕不 Send）。
+// register 校验 token 非空，但 legacy /register 或未来 DELETE/ResetKeys 可能造空 token 设备——这条分支是防静默 success 假绿的留痕防线。
+// 直注空 token 设备绕过 register 校验（构造分支触发条件）。
+func TestFanoutPush_EmptyToken(t *testing.T) {
+	pk := &countingPusher{}
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "empty.db")
+	bb, err := store.NewBBolt(dbPath)
+	if err != nil {
+		t.Fatalf("NewBBolt: %v", err)
+	}
+	defer bb.Close()
+	if _, err := bb.EnsureKey2(); err != nil {
+		t.Fatalf("EnsureKey2: %v", err)
+	}
+	// 直注空 token 设备（绕过 register 的 token 非空校验，构造 empty-token 分支触发条件）
+	if err := bb.RegisterDevice(model.Device{UUID: "emptydev", Platform: "harmony", PushToken: ""}); err != nil {
+		t.Fatalf("RegisterDevice emptydev: %v", err)
+	}
+	ts := newPushServerWithStore(t, pk, bb)
+	key1 := registerFirstSet(t, ts, "firstset") // first-set key1（push 准入用，与 emptydev 无关）
+
+	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"emptydev"}`)
+	defer resp.Body.Close()
+	if r.Code != 200 {
+		t.Errorf("empty token: code=%d msg=%q (want 200, 消息落库不推)", r.Code, r.Message)
+	}
+	if pk.calls != 0 {
+		t.Errorf("empty token 不该调 Send: calls=%d (want 0, 留痕不推)", pk.calls)
+	}
+}
+
+// TestIngest_TimestampBackfilled ingest 后 fanoutPush 收到的 msg.TS>0（CP3c 跨审 D P1：msg.TS 跨层回填）。
+// 验 push.go ingest 预填 TS（防 CP4 PushKit showBeginTime/归并 key 全 0）+ HLC 回填。
+func TestIngest_TimestampBackfilled(t *testing.T) {
+	pk := &countingPusher{}
+	ts, _ := newPushServer(t, pk)
+	key1 := registerFirstSet(t, ts, "dev1")
+
+	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
+	defer resp.Body.Close()
+	if r.Code != 200 || pk.calls != 1 {
+		t.Fatalf("push: code=%d msg=%q calls=%d (want 200, Send 调 1 次)", r.Code, r.Message, pk.calls)
+	}
+	if pk.lastMsg.TS == 0 {
+		t.Errorf("msg.TS 应回填非 0: got 0 (CP4 PushKit showBeginTime 会全 0/全归并)")
+	}
+	if pk.lastMsg.HLC == 0 {
+		t.Errorf("msg.HLC 应回填非 0: got 0")
 	}
 }

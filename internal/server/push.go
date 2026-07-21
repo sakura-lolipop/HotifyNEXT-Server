@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
@@ -36,7 +37,10 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 	if msg.Category == "" {
 		msg.Category = "default" // category 兜底（业务 category 值集含 default，§13b）
 	}
-	hlc, err := s.st.SaveMessage(msg) // store 内填 HLC + TS（if TS==0）
+	if msg.TS == 0 {
+		msg.TS = time.Now().UnixNano() // 预填 TS（CP3c 跨审 D P1：store SaveMessage 内填 TS 是值传递副本，ingest 的 msg.TS 还是 0 → fanoutPush/Pusher.Send 收 TS=0；CP4 PushKit showBeginTime/归并 key 会全 0）。store if TS==0 不覆盖（已非 0）；与 store 内 nowNs 差几 ns 无害（HLC 单调靠 store 自己的 counter 不靠 msg.TS）
+	}
+	hlc, err := s.st.SaveMessage(msg) // store 内填 HLC（TS 已在上面预填）
 	if err != nil {
 		return 0, err // 存失败：消息没落库，推送无意义——挡
 	}

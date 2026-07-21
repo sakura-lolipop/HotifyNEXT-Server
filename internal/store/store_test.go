@@ -768,3 +768,26 @@ func TestMemory_MessagesSince(t *testing.T) {
 		t.Errorf("Memory Since: got %d, want 2", len(got))
 	}
 }
+
+// TestKey1Matches_ConstantTime key1Matches 是 fail-closed 鉴权防线原子单元（CP3c 跨审 C P1 漏测补，零直接覆盖）。
+// 验：current=="" 防护 quirk（防 subtle.ConstantTimeCompare(空,空)==1 → 鉴权绕过）/ 长度不等不泄露 / 正确匹配 / 大小写敏感（key1 是 64-hex，subtle 字节比）。
+func TestKey1Matches_ConstantTime(t *testing.T) {
+	// current=="" 必 false（防 subtle.ConstantTimeCompare(空,空)==1 quirk——调用方虽先判未设，收进函数防 CP5 新调用方踩坑）
+	if key1Matches("anything", "") {
+		t.Errorf(`current=="" 应 false（防 quirk），got true`)
+	}
+	// 长度不等 false（不泄露内容）
+	if key1Matches("short", "64-hex-key1-fixed-length-value-placeholder-00000000000") {
+		t.Errorf("长度不等应 false（不泄露内容）")
+	}
+	// 正确匹配 true
+	good := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+	if !key1Matches(good, good) {
+		t.Errorf("正确匹配应 true")
+	}
+	// 大小写敏感（subtle 字节比，hex 大写不匹配小写）
+	upper := "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4E5F6A1B2"
+	if key1Matches(upper, good) {
+		t.Errorf("大小写敏感：hex 大写应不匹配小写（got true 是 bug）")
+	}
+}

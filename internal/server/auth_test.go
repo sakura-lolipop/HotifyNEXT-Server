@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -46,9 +47,10 @@ func apiRegister(t *testing.T, tsURL, key1, payload string) (*http.Response, reg
 	return resp, parsed
 }
 
-// errStore 模拟 keys 桶损坏：覆写 AuthorizeRead/ResolveRegisterKey 返 err（其余方法未实现，调用会 panic；本文件测试路径仅触达这两个）。
+// errStore 模拟 keys 桶损坏：覆写 AuthorizeRead/ResolveRegisterKey 返 err，其余方法 delegate *store.BBolt。
+// CP3c 跨审 D P2：原嵌入 store.Store interface（零值 nil）触达其他方法会 panic——改嵌入 *BBolt 对齐 push_test.go 风格（errSaveStore/errGetDeviceStore）。
 // 测 requireKey1/handleAPIRegister 的 err→500 映射（R1 fail-closed HTTP 契约：err 不降级成 401）。
-type errStore struct{ store.Store }
+type errStore struct{ *store.BBolt }
 
 func (errStore) AuthorizeRead(string) (bool, error) {
 	return false, errors.New("keys bucket corrupt (injected)")
@@ -58,10 +60,20 @@ func (errStore) ResolveRegisterKey(string) (string, bool, error) {
 }
 
 // newCorruptServer 起一个 store 恒返 err 的 server（测 HTTP err→500）。
+// 建 bb 让 errStore 嵌入真 *BBolt（覆写两方法返 err，其余 delegate 不 panic）。
 func newCorruptServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	dir := t.TempDir()
+	bb, err := store.NewBBolt(filepath.Join(dir, "corrupt.db"))
+	if err != nil {
+		t.Fatalf("NewBBolt: %v", err)
+	}
+	t.Cleanup(func() { _ = bb.Close() })
+	if _, err := bb.EnsureKey2(); err != nil {
+		t.Fatalf("EnsureKey2: %v", err)
+	}
 	cfg := &config.Config{Server: config.ServerConfig{Addr: ":0"}}
-	srv := New(cfg, errStore{}, pushkit.New(pushkit.Config{}))
+	srv := New(cfg, errStore{bb}, pushkit.New(pushkit.Config{}))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -385,5 +397,35 @@ func TestExtractKey1_HeaderPriority(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("header over query: status=%d, want 200 (header wins)", resp.StatusCode)
+	}
+}
+
+// TestExtractKey1_NonBearerScheme 非 Bearer scheme（Basic/Digest/Token）→ extractKey1 返空不误解析（CP3c 跨审 C P1 漏测补）。
+// 防 Authorization: Basic xxx 的 Basic 值被当 key1 误放行（extractKey1 只匹配 Bearer 前缀，但契约未锁）。
+func TestExtractKey1_NonBearerScheme(t *testing.T) {
+	cases := []string{
+		"Basic abc123",        // Basic 认证不应被当 key1
+		"Digest username=x",   // Digest 同
+		"Token xyz",           // 非 Bearer 的其他 scheme
+		"bearer abc",          // 小写 bearer——EqualFold 匹配 Bearer 前缀大小写不敏感，会提取（验证大小写不敏感契约，非 bug）
+	}
+	for _, auth := range cases {
+		req, err := http.NewRequest(http.MethodGet, "/messages/x", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", auth)
+		got := extractKey1(req)
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			// bearer（任意大小写）应提取值
+			if got == "" {
+				t.Errorf("Bearer scheme %q: extractKey1 返空 (want 提取值)", auth)
+			}
+			continue
+		}
+		// 非 Bearer scheme 应返空（不误把 Basic/Digest/Token 值当 key1）
+		if got != "" {
+			t.Errorf("非 Bearer scheme %q: extractKey1=%q (want 空，不误解析)", auth, got)
+		}
 	}
 }

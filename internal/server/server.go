@@ -62,7 +62,8 @@ func (s *Server) Run() error {
 // POST /register {device_key, push_token, name}
 // CP1：旧字段名 device_key 兼容（值映射 Device.UUID）；Platform 临时默认 "harmony"；
 // Type 缺失（NEXT-client §1 注册要上报 type，CP3/CP4 改 /api/v1/register 补 platform+type 真字段）。
-// 错误响应保持 http.Error 纯文本（legacy 老兼容，CP3a 行为不变——成功用 writeOK JSON，错误纯文本是原状）。
+// 错误响应用 writeAPIError JSON（CP3c 跨审 E P1：TD-3 尾巴——原 http.Error 纯文本让"成功 JSON/错误纯文本"二分裂，
+// 全仓唯一漏 envelope 外的端点；统一 JSON envelope，老 App 按 body.code 字段解析兼容）。
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		DeviceKey string `json:"device_key"`
@@ -70,11 +71,11 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "bad json")
 		return
 	}
 	if b.DeviceKey == "" || b.PushToken == "" {
-		http.Error(w, "device_key and push_token required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "device_key and push_token required")
 		return
 	}
 	if err := s.st.RegisterDevice(model.Device{
@@ -83,7 +84,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		PushToken: b.PushToken,
 		Name:      b.Name,
 	}); err != nil {
-		http.Error(w, "register failed: "+err.Error(), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, "register failed: "+err.Error())
 		return
 	}
 	log.Printf("[register-legacy] device=%s token=%s (old App, no key1 first-set)", b.DeviceKey, mask(b.PushToken))

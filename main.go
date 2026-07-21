@@ -43,6 +43,13 @@ func main() {
 		log.Fatalf("unknown store.type %q", cfg.Store.Type)
 	}
 
+	// FIFO 空间阈值清理未实装（CP3c 跨审 D P2：config/ARCHITECTURE 声明"空间阈值+FIFO"但 store 零实装，max_bytes 形同虚设）。
+	// 公网部署 bark 写开放下磁盘可能被灌满——启动告警让运维知晓 max_bytes 当前 advisory（TD-13 Phase 2 实装）。
+	if cfg.Store.Type == "bbolt" && cfg.Store.MaxBytes > 0 {
+		log.Printf("[WARN] FIFO eviction not implemented (TD-13, Phase 2); max_bytes=%d advisory — "+
+			"bark write-open can fill disk on public deploy", cfg.Store.MaxBytes)
+	}
+
 	// 启动确保 key2 已生成（docs §9：server 启动生成 key2，设备构造 share URL 用）
 	// key1 不预生成，走空起始 first-set（首设备 register 触发，CP2 实装）
 	if _, err := st.EnsureKey2(); err != nil {

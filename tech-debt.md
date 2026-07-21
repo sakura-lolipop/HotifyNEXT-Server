@@ -10,7 +10,7 @@
 |---|---|---|---|
 | **CP3 开头** | TD-3（envelope 类型化） | 先建 `apiResp` + `writeAPIError` 再写 CP3 新端点 | CP2 已 5 处临界，CP3 端点（`/api/v1/messages`/`push`/`media`）翻倍；状态码双写是漏改源——边写边欠新债 |
 | **CP3 流里** | TD-4（410 双胞胎 + device helper）+ **TD-5（bark.go 9 缺口，CP3 bark 兼容本职）** | TD-4 随 `/read` 删 + device 写方法抽 `mutateDevice`；**TD-5 = CP3 bark 兼容层按 `bark.md` §4 重写（含 2 段路径 bug）** | TD-5 非 cleanup、是 CP3 本职，列此追踪 9 缺口 |
-| **Phase 2 cleanup 批次** | TD-1（文件拆分）+ TD-2（saveKeys DRY）+ TD-10（SaveMessage 签名）+ TD-11（pk→pusher 字段名） | CP3 端点稳定后 | TD-1 前置依赖 CP3（现在拆=churn）；静态 DRY/命名不 compound，批处理省 context-switch |
+| **Phase 2 cleanup 批次** | TD-1（文件拆分）+ TD-2（saveKeys DRY）+ TD-10（SaveMessage 签名）+ TD-11（pk→pusher 字段名）+ TD-13（FIFO 空间阈值实装） | CP3 端点稳定后 | TD-1 前置依赖 CP3（现在拆=churn）；静态 DRY/命名不 compound，批处理省 context-switch；TD-13 跨审 D P2（max_bytes 声明零实装，公网磁盘崩风险） |
 | **MVP 后工程化批次** | TD-6（CI + golangci-lint）+ TD-7（版本注入） | CP6（Phase 1 MVP 收尾）后 | 迭代期 churn 快 CI 噪声大反碍事；MVP 稳定后上自动门防回归 + 分发排错要版本号（2026-07-21 架构评估记） |
 | **CP4 批次** | TD-12（msg.URL 协议白名单） | CP4（pushkit 搬，接 clickAction 前） | CP3c 两边（bark+native）裸收 url 未校验；CP4 pushkit 喂 clickAction.data 前必须加协议白名单（http/https/app scheme）防 javascript:/file: 跳转（XSS/钓鱼/本地文件泄露，CP3c 对抗审 B P2） |
 | **CP6 批次** | TD-8（client 契约文档）+ TD-9（fanoutPush sentinel） | CP6（部署就绪） | client 接 API 要错误码契约文档；fanoutPush 全广播扇出前补 sentinel 防五分支语义糊（CP3b 屎山审 P2-3） |
@@ -90,6 +90,13 @@
 - **为什么 CP3c 不修**：CP3c 是解析层（bark/native 收 URL 进 Message.URL），URL 校验是推送层（CP4 pushkit 喂 clickAction 时）。clickAction 语义未定（CP4 验），现在加白名单可能错（万一鸿蒙支持自定义 app scheme）。归 CP4 验证后定。
 - **怎么修**：CP4 pushkit 接 `msg.URL` 前加协议白名单（http/https/自定义 app scheme 才放行，长度 ≤ 2048），bark 和 native 共用同一 sanitize helper（放 response.go 或新建 sanitize.go）。
 - **触发**：CP4（pushkit 搬 legacy `hotify-bridge/go/push.go`，接 clickAction 时）。
+
+### TD-13 FIFO 空间阈值清理实装（2026-07-21 CP3c 跨审 D P2）
+- **现状**：config 校验 `max_bytes > 0` + ARCHITECTURE 声明"超阈值 → FIFO 删 HLC 最老 → 回阈值 + 周期 bbolt.Compact()"，**store 全文零实装**（grep `FIFO|prune|Compact` 无命中）。SaveMessage 只 Put 不 Delete——`max_bytes` 形同虚设。
+- **风险**：公网部署 bark `/{key}` 写开放（design 接受可见 DoS）下，扫描器/恶意脚本无限灌 bbolt msgs 桶 → 磁盘满 → 服务端整体崩溃（不只 bark，native /api/v1/* 也挂）。单 CP 都"接受可见 DoS"，**跨 CP 才看到"无 QPS 限流 + 无 FIFO = 磁盘必然崩"**（bark 写开放 + max_bytes 无 enforcement + FIFO 零实装三者闭环）。
+- **现状兜底**：main.go 启动告警 `[WARN] FIFO eviction not implemented; max_bytes advisory`（CP3c 加，让运维知晓 + 单用户可信域泄露概率低接受）。
+- **怎么修**：SaveMessage 后检查 msgs 桶大小超 `max_bytes` → `Cursor.First()` 删最老 HLC → 回阈值；周期跑 `bbolt.Compact()` 回收空间。可选 per-IP token bucket 限流（`golang.org/x/time/rate`，零 CGO 已是项目约束）防 bark 写开放灌库。
+- **触发**：Phase 2 cleanup（CP6 MVP 后；公网部署前必须，否则磁盘崩）。
 
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 

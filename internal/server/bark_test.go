@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -494,7 +495,7 @@ func TestBark_TooManyFields(t *testing.T) {
 	// 构造 > maxBarkFields(128) 个未知字段
 	var fields []string
 	for i := 0; i < maxBarkFields+10; i++ {
-		fields = append(fields, `"kf`+itoa(i)+`":"v"`)
+		fields = append(fields, `"kf`+strconv.Itoa(i)+`":"v"`)
 	}
 	body := `{"body":"b",` + strings.Join(fields, ",") + `}`
 	req := newBarkRequest(http.MethodPost, "/mykey", body, "application/json")
@@ -502,19 +503,6 @@ func TestBark_TooManyFields(t *testing.T) {
 	if err == nil {
 		t.Errorf("字段超上限应返 err（→ 400）")
 	}
-}
-
-// itoa 简单 itoa（避免引入 strconv 到测试，保持依赖最小）。
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var buf []byte
-	for i > 0 {
-		buf = append([]byte{byte('0' + i%10)}, buf...)
-		i /= 10
-	}
-	return string(buf)
 }
 
 // TestBark_Favicon_NotIngest catch-all 扫描器（GET /favicon.ico）→ 空 content 400 拒 + 不落库（CP3c 跨层审 P2 #3）。
@@ -567,5 +555,32 @@ func TestBark_InternalPath_NotPollute(t *testing.T) {
 	msgs, _ := bb.MessagesSince(0, 10)
 	if len(msgs) != 0 {
 		t.Errorf("POST /messages/abc 不该落库: %d (want 0, /messages/ 子树 404)", len(msgs))
+	}
+}
+
+// TestBark_SubtitleOnly_Rejected 仅 subtitle（title/body 空）→ empty=true → 400 拒（CP3c 跨审 D P1 修）。
+// subtitle 进 Ext 不是 Message 内容，不算"有内容"，跟原生 push 必填对称。防扫描器 {"subtitle":"."} 绕过空内容拒绝灌历史。
+func TestBark_SubtitleOnly_Rejected(t *testing.T) {
+	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{}))
+	resp, err := http.Post(ts.URL+"/mykey", "application/json", strings.NewReader(`{"subtitle":"only-sub"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("仅 subtitle: status=%d (want 400, empty content)", resp.StatusCode)
+	}
+	msgs, _ := bb.MessagesSince(0, 10)
+	if len(msgs) != 0 {
+		t.Errorf("仅 subtitle 不该落库: %d (want 0)", len(msgs))
+	}
+}
+
+// TestBark_DeviceKeyInQuery_Dropped query ?device_key=x → drop（path segs[0] 是唯一 key，CP3c 跨审 C P1 漏测补）。
+func TestBark_DeviceKeyInQuery_Dropped(t *testing.T) {
+	req := newBarkRequest(http.MethodGet, "/pathkey?device_key=querykey&body=b", "", "")
+	msg, _, _ := parseBark(req, []string{"pathkey"})
+	if msg.TargetUUID != "pathkey" {
+		t.Errorf("TargetUUID 应取 path 不取 query: got %q, want pathkey", msg.TargetUUID)
 	}
 }

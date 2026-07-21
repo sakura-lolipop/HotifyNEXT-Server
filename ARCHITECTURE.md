@@ -59,15 +59,16 @@ ServeMux 更具体优先：`/api/v1/*`、`/share/*`、`/messages/*`、`/register
 
 | 桶 | key | value（JSON） | 用途 |
 |---|---|---|---|
-| `device` | uuid | `{platform, push_token, type, key_ver, name}` | 设备注册（type=phone/watch/... 显图标） |
-| `msgs` | HLC（big-endian） | `{hlc, from, category, title, body, ts, media}` | 消息历史 |
-| `cursor` | uuid | `{view, focus_HLC, reported_at}` | 阅读游标（覆盖式，不 TTL） |
+| `device` | uuid | `{platform, push_token, type, name, created_at, updated_at, last_seen_at}` | 设备注册（type=phone/watch/... 显图标）；§9 砍 key_ver（紧急重置不搞无感轮换） |
+| `msgs` | HLC（big-endian） | `{hlc, from, recipient, category, title, body, ts, media_ids, target_uuid, url, ext}` | 消息历史（CP3b 砍 PushSpec，直存 Message） |
+| `cursor` | 单值 `keyCurrent`（global） | `{view, focus_HLC, reported_at}` | 阅读游标（覆盖式，多设备并发最新 reported_at 胜 LWW；**非 per-uuid**——单用户域共享一游标） |
 | `media` | media_id | `{path, size, mime}` | 媒体 metadata（blob 在文件系统） |
-| `keys` | 单值 | `{key1:{current,retired,retired_exp}, key2}` | key1/key2 + 轮换状态 |
+| `keys` | 单值 | `{key1, key2}` | key1/key2 扁平（§9 砍 retired/retired_exp/key_ver，紧急重置不搞无感轮换） |
 | `profile` | 单值 | `{infer[], rules[]}` | 呈现 profile（不透明 blob） |
 
-**清理：纯空间阈值 + FIFO（单一机制）**
+**清理：纯空间阈值 + FIFO（单一机制）—— ⚠️ TD-13 未实装（CP3c 跨审 D P2）**
 - 默认上限 **1024MB**（config + CLI 可配）。写消息后检查，超 → 从 HLC 最小（最老）删整条（metadata + blob）→ 回阈值。
+- **当前 store 零实装**（grep `FIFO|prune|Compact` 无命中）——`max_bytes` 形同虚设，main.go 启动告警 `[WARN] FIFO eviction not implemented; max_bytes advisory`。Phase 2 实装（公网部署前必须，否则 bark 写开放灌满磁盘崩）。
 - **无 TTL、无数量 retention、无分层**（文本几乎不占空间，瓶颈是多媒体 blob；空间够全留，满 FIFO 清最老）。
 - bbolt 删留空洞 → 定期 `bbolt.Compact()`（启动检查 + 手动 `--compact`）。
 - **已读状态砍**（通知中转是瞬时告知型）——无 `read:` 桶。
@@ -83,6 +84,8 @@ ServeMux 更具体优先：`/api/v1/*`、`/share/*`、`/messages/*`、`/register
 - B 拿 share URL（带 key2）只能**推消息给 A**，注册不成 A 设备（没 key1）、拉不了 A 历史（读端点要 key1）。
 
 **key1 空起始 first-set**：key1 起始为空；首设备 `/register` 不带 key1 → server first-set（设 + 下发）；之后所有 register/读端点必须带 key1。防抢注靠 first-set wins + 部署层兜底（抢注=可见 DoS + 无泄密 + SSH 删 config 重置）。
+
+**register uuid 语义（token 刷新 vs 顶号，CP3c 跨审 C 文档化）**：register **不验 uuid 来源**——同 uuid 第二次 register 走 patch 语义覆盖第一次的 token（RegisterDevice 非空字段覆盖/空字段保留）。**契约：这是"token 刷新"合法**（设备重装/换机用同 uuid 续历史），**非"顶号漏洞"**——单用户可信域（App 自生成 UUIDv4，uuid 泄露概率低 + 泄露也只能刷自己 token、读端点仍要 key1 准入不窃历史）。跨户/不可信域要防顶号须加 uuid 来源验证（未来多户扩展再议）。**理论不出现**：可信域 + UUIDv4 碰撞概率忽略。
 
 **key 轮换 = 紧急重置（不搞无感轮换）**：日常 key1/key2 不变。发现泄露/要换 → **CLI 重置**（清 key1/key2）→ 设备重新 `/register` first-set 新 key1 + 拿新 key2（接受短暂中断、所有设备重连）。**为什么不搞无感轮换**（retired 重叠期 + WS `key_update`）：key_update 走 WS 下发 = 任何持有效 key1 的连接都收新 key1，**泄露方在重叠期连上就跟着拿新 key1，轮换对它无效**——共享密钥 + WS 下发的固有缺陷，调时长解决不了。Hotify 单用户可信域 key 泄露概率低，无感卫生轮换价值小（YAGNI），紧急重置（罕见）够用且更简单：**无 retired/过期/key_update 帧/key_ver**，key 机制只剩 first-set + 紧急重置。
 

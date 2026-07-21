@@ -159,14 +159,18 @@ func splitBarkPath(path string) []string {
 
 // parseBark 解析 bark 请求（路径式 + JSON/query/form 合并）→ model.Message + 空 content 标志。
 // key（segs[0]）→ msg.TargetUUID（无鉴权 §1.4）。
-// empty=true 表示 title/body/subtitle 全空（无内容）—— 调用方（handleBark）据此拒 400 不 ingest。
+// empty=true 表示 title/body 全空（无 Message 内容）—— 调用方（handleBark）据此拒 400 不 ingest。
+//
+// subtitle 不参与 empty 判定（CP3c 跨审 D P1 修）：subtitle 进 Ext 不是 Message 内容（model 无 Subtitle 字段），
+// 旧判定含 subtitle 导致 POST /key {"subtitle":"x"} 落库 Title="" Body="" Ext[subtitle]="x" 的空骨架，扫描器绕过空内容拒绝灌历史。
+// 跟原生 push 必填 title/body 对称（Hotify 无 APNs，bark-server 副标题兜底是 APNs hack 不继承）。
 func parseBark(r *http.Request, segs []string) (msg model.Message, empty bool, err error) {
 	params, err := collectBarkParams(r, segs)
 	if err != nil {
 		return model.Message{}, false, err
 	}
 	msg = buildBarkMessage(segs[0], params)
-	empty = msg.Title == "" && msg.Body == "" && params["subtitle"] == ""
+	empty = msg.Title == "" && msg.Body == "" // subtitle 进 Ext 不算 Message 内容
 	return msg, empty, nil
 }
 
