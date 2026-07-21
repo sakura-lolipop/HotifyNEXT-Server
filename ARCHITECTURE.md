@@ -132,9 +132,22 @@ ServeMux 更具体优先：`/api/v1/*`、`/share/*`、`/messages/*`、`/register
 - **死 token**：80100000/80300007 删（全局闸门：本轮 ≥1 台成功才删）；notifyId 幂等；502/超时重试。
 - 详见 `PUSHKIT.md` + `docs/pushkit-transport.md`。
 
-## 多平台 adapter（初赛只鸿蒙）
+## 多平台推送分派（CP4 pushkit 框架 + CP5/CP6 WS）
 
-鸿蒙 PushKit（day-one，搬 push.go）；iOS APNs / 安卓·Win WS 保活 后续按需。adapter 接口在出口层（统一出域 + 平台分发）。
+推送按 **`Device.PushToken` 有无**（系统推送通道）分两类——`fanoutPush`（CP6 全广播）据此选路径：
+
+**系统推送（pushkit adapter，dev.PushToken 非空，离线杀后台也能收）**：
+
+| Platform | adapter 文件 | 通道 | CP4 状态 |
+|---|---|---|---|
+| harmony | `pushkit/harmony.go` | 华为 Push Kit v3（JWT Bearer，已过审 SUBSCRIPTION） | CP4 实装（搬 legacy）|
+| android（HMS） | `pushkit/android.go` | HMS Push v1（OAuth2 access_token，**仅华为系安卓**） | CP4 stub（CP4.5 实装）|
+| ios + macos | `pushkit/apns.go` | **APNs（共享 .p8 Auth Key，Bundle ID 区分 ios/macos）** | CP4 stub（需 99 美元/年 Apple Developer + .p8 + 苹果审核，待用户需求触发）|
+
+**在线推（WS `/stream` + 客户端本地通知，dev.PushToken 空，App 在线才收）**：
+- **非 HMS 安卓**（无华为移动服务的安卓：海外/原生/小米/vivo/OPPO 等没装 HMS 框架，无 HMS Push token）+ **windows / linux**（无统一系统推送通道）：走 CP5 WS 在线推 + 客户端本地通知；离线错过靠 `/messages?since=HLC` 上线补漏。
+
+**留接口避 YAGNI + 扩展容易**：`pushkit/` 只 4 文件（`client.go` 分派 + harmony/android/apns），无 token 设备（非HMS安卓/windows/linux）**不建 pushkit 文件**（走 WS 另一条路）。`Client.Send` switch 三档（harmony/android/`ios`+`macos`）+ default err。加平台/通道 = 加 adapter 文件 + case，**零改 Pusher interface**（CP3b 宽签名 `Send(msg, dev)` 已 ready）。`fanoutPush`（CP6）按 `dev.PushToken` 有无选：有→pushkit.Send，无→WS fanout（在线）/跳过（离线，/messages 拉）。
 
 ## 商业模式（server 不参与 gating）
 
