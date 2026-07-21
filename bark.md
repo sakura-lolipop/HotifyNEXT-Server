@@ -106,6 +106,22 @@
 
 > HotifyNEXT §19 写端点分层定调 "bark `/{device_key}` 完全无鉴权——bark 协议本质" **与源码完全吻合**，CP3 bark 端点不加 key1。
 
+### 1.4.1 Hotify device_key 语义（≠ bark-server，重要）
+
+bark-server：device_key **server 生成**（`route_register.go` 空 key 填 UUID，App 注册时拿）。
+**Hotify：device_key = App 自生成 UUIDv4**（`/api/v1/register` 上报，App 主导非 server）——主从原则（bark 从，device_key 归 Hotify uuid 体系，保证设备身份跨重装稳定）。
+
+**用户流程**：
+1. Hotify App `/api/v1/register`（自生成 uuid 上报）→ server 存 `device{uuid→token}`
+2. **⚠️ App 显示 bark URL** `http://{server}/{uuid}` 供用户复制（**App UI 待办**——否则用户不知 device_key 哪来；bark-server 用户习惯 server 生成 key，Hotify 是 App 自生成上报）
+3. 用户配发送端（SmsForwarder 等）bark 通道：server URL + `device_key=uuid`
+4. 发送端推 `POST /{uuid}/{title}/{body}` → server `GetDevice(uuid)` 存在 → 落库 + 推
+
+**device not found 400 的兼容语义**（CP3c 跨审修正，commit 71de279）：
+- 推**已注册 uuid** → 200 落库 + 推（兼容，正常用）
+- 推**随便编 / 配错 / 别的 server key / 扫描器** → 400 `device not registered`（**正确行为**：提示用户 device_key 配错 + 从根杀灌库——攻击者必须知真实 uuid 才能灌，2^128 枚举不可能）
+- bark 兼容的是**协议格式**（路径式 / JSON / query / form），**不是**"随便编 key 也收"——device_key 必须对应已注册设备
+
 ### 1.5 响应格式
 
 **`CommonResp` struct**（`router.go:19-24`）：
