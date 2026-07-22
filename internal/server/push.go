@@ -54,7 +54,8 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 		var err error
 		dev, err = s.st.GetDevice(msg.TargetUUID)
 		if errors.Is(err, store.ErrNotFound) {
-			return 0, err // device not found → 不落库（handler 400），从根杀灌库向量
+			log.Printf("[push] device not found target=%s (不落库，从根杀编 key 灌库向量)", msg.TargetUUID)
+			return 0, err // device not found → 不落库（handler 400）
 		}
 		if err != nil {
 			return 0, err // GetDevice 内部错 → handler 500
@@ -65,9 +66,10 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 		return 0, err // 存失败：消息没落库——挡
 	}
 	msg.HLC = hlc // 值传递：store 改的是副本，原 msg.HLC 还是 0；回填让 fanoutPush log/未来 CP6 全广播用对 HLC
+	// 存库留痕（HLC 归因）：定向/全广播都打，覆盖「定向推成功只在 [pushkit] ✓ 有、server 层无 hlc」+ 调试模式黑洞。
+	log.Printf("[push] saved hlc=%d target=%s category=%s", msg.HLC, msg.TargetUUID, msg.Category)
 	if msg.TargetUUID == "" {
-		// CP3：无定向目标，落库不推（CP6 改全广播 AllDevices 扇出）。留痕。
-		log.Printf("[push] no target_uuid, saved only (全广播扇出留 CP6) hlc=%d", msg.HLC)
+		// CP3：无定向目标，落库不推（CP6 改全广播 AllDevices 扇出）。
 		return hlc, nil
 	}
 	if pushErr := s.fanoutPush(msg, dev); pushErr != nil {

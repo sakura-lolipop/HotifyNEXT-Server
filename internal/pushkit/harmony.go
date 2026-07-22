@@ -138,19 +138,19 @@ func (c *Client) harmonySend(msg model.Message, dev model.Device) error {
 		status, diagMsg := c.postToCloudFunction(cfURL, &requestBody)
 		switch status {
 		case harmonyDelivered:
-			log.Printf("[pushkit] ✓ harmony %s code=80000000 (url=%s)", dev.UUID, cfURL)
+			log.Printf("[pushkit] ✓ harmony %s hlc=%d code=80000000 (url=%s)", dev.UUID, msg.HLC, cfURL)
 			return nil
 		case harmonyDead:
-			log.Printf("[pushkit] ✗ harmony %s dead token (url=%s) msg=%s", dev.UUID, cfURL, diagMsg)
+			log.Printf("[pushkit] ✗ harmony %s hlc=%d dead token (url=%s) msg=%s", dev.UUID, msg.HLC, cfURL, diagMsg)
 			return fmt.Errorf("%w: %s", ErrDeadToken, diagMsg)
 		case harmonySystemError:
-			log.Printf("[pushkit] ⚠ harmony %s system_error (url=%s) msg=%s", dev.UUID, cfURL, diagMsg)
+			log.Printf("[pushkit] ⚠ harmony %s hlc=%d system_error (url=%s) msg=%s", dev.UUID, msg.HLC, cfURL, diagMsg)
 			return fmt.Errorf("harmony push system error: %s", diagMsg) // 非 token 死活，保留 token
 		}
 		// harmonyRetry：本 URL 重试用尽 → 试下一个 URL（fallback）
 	}
 	// 所有 URL retry 用尽 → 保留 token（下次新消息再推），不返 ErrDeadToken（非死 token，疑云函数全挂）。
-	log.Printf("[pushkit] ✗ harmony %s all cloud function URLs exhausted, keep token", dev.UUID)
+	log.Printf("[pushkit] ✗ harmony %s hlc=%d all cloud function URLs exhausted, keep token", dev.UUID, msg.HLC)
 	return fmt.Errorf("harmony push all cloud function URLs exhausted")
 }
 

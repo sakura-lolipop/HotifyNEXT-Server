@@ -177,11 +177,25 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, http.StatusNotFound, "not found: "+r.URL.Path)
 }
 
+// statusRecorder 包 ResponseWriter 捕获响应码（logReq 打 status 用——P1：原只 log method/path/duration
+// 吞了 200/400/401/500，公网排障看不出成败/扫描；加 status+IP 一次兜住所有 handler 的 400/401/404/415）。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
 func logReq(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		h.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start))
+		sr := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		h.ServeHTTP(sr, r)
+		// [http] method path status remoteAddr duration —— status/IP 公网排障（成败 + 谁在打）
+		log.Printf("[http] %s %s %d %s %s", r.Method, r.URL.Path, sr.status, r.RemoteAddr, time.Since(start))
 	})
 }
 

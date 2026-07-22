@@ -11,6 +11,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -65,7 +66,11 @@ func writeOK(w http.ResponseWriter, msg string) {
 
 // writeAPIError native 错误响应（HTTP status = code，一处定义防双写漏改——TD-3 核心）。
 // status 既是 HTTP status 又是 body.code，消除"`http.StatusXxx` + `\"code\": N` 双写改一处漏另一处"。
+// P2-4：500 err 落 log（bbolt 坏/GetDevice 内部错/存失败——间歇性磁盘问题第一次就在日志抓到，不靠 client 回贴响应体）。
 func writeAPIError(w http.ResponseWriter, status int, msg string) {
+	if status >= 500 {
+		log.Printf("[server] %d %s", status, msg)
+	}
 	writeJSON(w, status, apiResp{Code: status, Message: msg})
 }
 
@@ -89,6 +94,9 @@ func writeHistory(w http.ResponseWriter, msgs []model.Message) {
 // writeBark bark 兼容皮响应（带 timestamp，bark.md §1.5 CommonResp 风格）。
 // timestamp 在此一处填（time.Now().Unix() 秒级，对齐 bark-server router.go:19-24）。
 func writeBark(w http.ResponseWriter, status int, msg string) {
+	if status >= 500 {
+		log.Printf("[bark] %d %s", status, msg) // P2-4：500 err 落 log（同 writeAPIError）
+	}
 	writeJSON(w, status, barkResp{Code: status, Message: msg, Timestamp: time.Now().Unix()})
 }
 
