@@ -154,10 +154,9 @@ func (s *Server) handleAPIRegister(w http.ResponseWriter, r *http.Request) {
 	writeRegister(w, key1, keys.Key2)
 }
 
-// handleHistory 取最新 50 条（升序 旧→新）。TD-19 修：原 MessagesSince(0,50) 返最老 50（CP1 临时 bug，
-// DB>50 新消息读不回），改 MessagesLatest。完整 since=HLC 游标分页留 Phase 2（/api/v1/messages?since=）。
+// handleHistory CP1 临时：忽略 {key} 路径参数，全局取最近 50 条（CP3b 改 /api/v1/messages?since=HLC）。
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
-	msgs, err := s.st.MessagesLatest(50)
+	msgs, err := s.st.MessagesSince(0, 50)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "history failed: "+err.Error())
 		return

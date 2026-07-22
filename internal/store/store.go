@@ -45,7 +45,6 @@ type Store interface {
 	// 消息（HLC key）
 	SaveMessage(m model.Message) (uint64, error)                    // 返回分配的 HLC
 	MessagesSince(since uint64, limit int) ([]model.Message, error) // since 之后升序（旧→新）；since=0 从最老；limit<=0 不限
-	MessagesLatest(limit int) ([]model.Message, error)              // 最新 N 升序（旧→新）；handleHistory 用（TD-19 修最老 50 bug）
 	Message(hlc uint64) (model.Message, error)                      // ErrNotFound
 
 	// 媒体（metadata；blob I/O 后续 CP）
@@ -343,36 +342,6 @@ func (s *BBolt) MessagesSince(since uint64, limit int) ([]model.Message, error) 
 		}
 		return nil
 	})
-	return out, err
-}
-
-// MessagesLatest 返回最新 limit 条（升序 旧→新）。handleHistory 用——修 TD-19
-// （MessagesSince(0,50) since=0 从最老扫返最老 50 的 CP1 临时 bug，DB>50 读不回新消息）。
-// Cursor.Last 倒序取 limit（新→旧）+ 反转成升序（旧→新，对齐 MessagesSince 语义，client 期望升序）。
-// limit<=0 默认 50。坏 JSON 返 err 不吞（同 MessagesSince 返回值纪律）。
-func (s *BBolt) MessagesLatest(limit int) ([]model.Message, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	reversed := make([]model.Message, 0, limit)
-	err := s.db.View(func(tx *bolt.Tx) error {
-		cursor := tx.Bucket([]byte(bucketMsgs)).Cursor()
-		for key, val := cursor.Last(); key != nil; key, val = cursor.Prev() {
-			if len(reversed) >= limit {
-				break
-			}
-			var msg model.Message
-			if err := json.Unmarshal(val, &msg); err != nil {
-				return fmt.Errorf("msgs bucket corrupt at hlc=%d: %w", binary.BigEndian.Uint64(key), err)
-			}
-			reversed = append(reversed, msg)
-		}
-		return nil
-	})
-	out := make([]model.Message, len(reversed))
-	for idx, msg := range reversed {
-		out[len(reversed)-1-idx] = msg // 倒序（新→旧）反转成升序（旧→新）
-	}
 	return out, err
 }
 
