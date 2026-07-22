@@ -79,7 +79,7 @@ func (c *Client) Send(msg model.Message, dev model.Device) error {
 	case "ios", "macos":
 		return c.apnsSend(msg, dev)
 	default:
-		log.Printf("[pushkit] unknown platform=%s device=%s token=%s", dev.Platform, dev.UUID, util.Mask(dev.PushToken))
+		log.Printf("[pushkit] unknown platform=%s device=%s hlc=%d token=%s", dev.Platform, dev.UUID, msg.HLC, util.Mask(dev.PushToken))
 		return fmt.Errorf("%w: %s", ErrUnknownPlatform, dev.Platform)
 	}
 }

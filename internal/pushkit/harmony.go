@@ -135,7 +135,7 @@ func (c *Client) harmonySend(msg model.Message, dev model.Device) error {
 
 	// 遍历 CloudFunctionURLs（fallback，pushkit-transport.md §11）：retry 用尽才试下一个 URL。
 	for _, cfURL := range c.cfg.CloudFunctionURLs {
-		status, diagMsg := c.postToCloudFunction(cfURL, &requestBody)
+		status, diagMsg := c.postToCloudFunction(cfURL, &requestBody, msg.HLC)
 		switch status {
 		case harmonyDelivered:
 			log.Printf("[pushkit] ✓ harmony %s hlc=%d code=80000000 (url=%s)", dev.UUID, msg.HLC, cfURL)
@@ -156,7 +156,7 @@ func (c *Client) harmonySend(msg model.Message, dev model.Device) error {
 
 // postToCloudFunction 向单个云函数 URL 发送（含重试 ≤ harmonyRetryLimit）。
 // delivered/dead/system_error 终态即出；retry 重试 ≤ harmonyRetryLimit 后返 retry 终态（调用方试下一个 URL）。
-func (c *Client) postToCloudFunction(cfURL string, body *cloudFuncRequestBody) (harmonyPushStatus, string) {
+func (c *Client) postToCloudFunction(cfURL string, body *cloudFuncRequestBody, hlc uint64) (harmonyPushStatus, string) {
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
 		return harmonySystemError, "body 序列化失败: " + err.Error()
@@ -171,7 +171,7 @@ func (c *Client) postToCloudFunction(cfURL string, body *cloudFuncRequestBody) (
 		}
 		// harmonyRetry
 		if attempt < harmonyRetryLimit {
-			log.Printf("[pushkit] ↻ harmony retry %d/%d (url=%s) %s", attempt+1, harmonyRetryLimit, cfURL, diagMsg)
+			log.Printf("[pushkit] ↻ harmony hlc=%d retry %d/%d (url=%s) %s", hlc, attempt+1, harmonyRetryLimit, cfURL, diagMsg)
 			time.Sleep(harmonyRetryInterval)
 		}
 	}

@@ -85,16 +85,16 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 //   - 其他错（system_error/网络）：返 err（保留 token，下次新消息再推）
 func (s *Server) fanoutPush(msg model.Message, dev model.Device) error {
 	if dev.PushToken == "" {
-		log.Printf("[push] device %s empty push token, saved but not pushed", msg.TargetUUID)
+		log.Printf("[push] device %s empty push token hlc=%d, saved but not pushed", msg.TargetUUID, msg.HLC)
 		return nil
 	}
 	if err := s.pusher.Send(msg, dev); err != nil {
 		if errors.Is(err, pushkit.ErrDeadToken) {
 			// 死 token → 清 PushToken，防反复推死 token 浪费云函数/Push Kit 配额（CP4 死 token 闸门）。
 			if clearErr := s.st.ClearPushToken(dev.UUID); clearErr != nil {
-				log.Printf("[push] device %s dead token but ClearPushToken failed: %v (token kept)", dev.UUID, clearErr)
+				log.Printf("[push] device %s hlc=%d dead token but ClearPushToken failed: %v (token kept)", dev.UUID, msg.HLC, clearErr)
 			} else {
-				log.Printf("[push] device %s dead token, PushToken cleared", dev.UUID)
+				log.Printf("[push] device %s hlc=%d dead token, PushToken cleared", dev.UUID, msg.HLC)
 			}
 			return nil // 死 token 非系统错：消息已落库，不挡（ingest 返 nil → handler 200 success）
 		}

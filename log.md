@@ -90,7 +90,8 @@
 - **P2-4 500 err 落 log**：err.Error() 之前只拼进响应体给 client，server 侧无 log；间歇磁盘问题第一次就在日志抓到。
 - **不上结构化 json log / 级别**：单用户自托管 stdlib grep 够；slog/logrus 引依赖 + 改全仓 log 调用，YAGNI。（bark-server 样式 agent 对比后定）
 
-## 待补充
+## 对抗验证 + bark-server 对比结论（2026-07-22 两 agent）
 
-- bark-server 日志样式对比 agent（格式/级别/字段/库）——验证「Hotify 该不该对齐」。
-- 日志验证 agent（起 Server + curl 验 P1/P2 输出 + 找缺口）——补充遗漏点。
+**日志验证 agent**（起 Server + 9 curl 覆盖）：P1 logReq status/IP + P2-1 device-not-found + P2-2 ingest saved hlc + P2-3 [pushkit] 终态 hlc + P2-4 500 err **全 PASS**。hlc 归因链（[http] status → [push] saved hlc → [pushkit] 终态 hlc）成功主路径完整可 grep。补缺口：retry 行 + [push] 下游三行（empty-token/dead-cleared/clear-failed）+ unknown platform 补 hlc（hlc grep 跨重试/失败路径断链修，归因链闭合）。
+
+**bark-server 样式 agent**（读 code-reference/bark/bark-server）：**不对齐**——bark-server 日志不比 Hotify 先进（`mritd/logger` 轻量分级 stdlib 封装 + printf 散文，**推送路径零业务日志**，access log 打 body 是反面教材/泄露风险）。Hotify `[tag] key=val` 反而更结构化、推送归因更丰富，**保持是正解**。唯一可考虑 Go 1.21+ `log/slog` 加级别（不引第三方；单用户低 QPS `[WARN]` 够，不急）。access log **不打 body**（bark-server 打 body = 推送内容泄露，Hotify 保持）。
