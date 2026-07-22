@@ -18,6 +18,7 @@ import (
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/pushkit"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/util"
 )
 
 // Pusher 推送能力抽象（CP3b）：server 依赖 interface 非 *pushkit.Client 具体类型，
@@ -144,7 +145,7 @@ func (s *Server) handleAPIPush(w http.ResponseWriter, r *http.Request) {
 		Recipient:  body.Recipient,
 		TargetUUID: body.TargetUUID,
 		MediaIDs:   body.MediaIDs,
-		URL:        body.URL,
+		URL:        util.SanitizeActionURL(body.URL), // TD-12：收 url 进 msg.URL 前 sanitize（javascript:/file: 拒→空；harmony clickAction.data 再 sanitize 双保险）
 		// TS: store 内填（if ==0）
 	}
 

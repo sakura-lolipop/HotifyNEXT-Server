@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/util"
 )
 
 // bark 协议层防护常量（CP3c 对抗审查 P1/P3，写开放 design 已接受可见 DoS，这些是实现层兜底）。
@@ -287,7 +288,10 @@ func buildBarkMessage(key string, params map[string]string) model.Message {
 		case "body":
 			msg.Body = val
 		case "url":
-			msg.URL = val
+			// TD-12：收 url 进 msg.URL 前 sanitize（javascript:/file: 等拒→空→不存；harmony clickAction.data 再 sanitize 是双保险）
+			if safeURL := util.SanitizeActionURL(val); safeURL != "" {
+				msg.URL = safeURL
+			}
 		case "ext":
 			extKey := rule.extKey
 			if extKey == "" {
