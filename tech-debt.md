@@ -128,6 +128,13 @@
 - **怎么修**：Server 启动 `cloud_function_urls` 空 → fetch Hotify 托管 `cloud_function_urls.txt`（同 legacy：ghproxy 加速 + 缓存 fallback），自托管用户 config.json override 自己的云函数 URL。zero-config 真推 + 自托管 override 兼容（Hotify 托管做默认/兜底，自托管 override）。
 - **触发**：CP5/CP6（zero-config pushkit 启用，方便自托管首装 + 复用 legacy 机制；CP4 联调手填 config 绕过）。
 
+### TD-19 GET /messages 返最老 50 非「最新 50」—— handleHistory CP1 临时 bug（2026-07-22 CP4 对抗测两 agent 钉）
+- **现状**：`server.go:158` handleHistory 调 `MessagesSince(0, 50)`——since=0 从 `c.First()` 最老扫（store.go MessagesSince），limit 50 截断 → 返**最老 50**（handleHistory 注释"全局取最近 50 条"与实现相反）。DB >50 条后新消息读不回（"拉历史"UX 坏）。
+- **根因**：handleHistory CP1 临时码（注释"CP3b 改 /api/v1/messages?since=HLC"但 CP3b 没做，该路由 404；读路径无替代）。adv_test `TestAdv_HistoryReturnsOldest` 已钉此缺陷。
+- **非 CP4 引入**（CP1 临时）。CP4 联调消息 <50 没撞；对抗测 agent 发 >50 撞到（消息落库 200 success 但读不回，一度误判"落库 bug"，实为读取窗口）。
+- **怎么修（Phase 2 messages 分页）**：handleHistory 改 `/api/v1/messages?since=HLC` 游标分页（client 带 since 拉增量，新→旧）+ `MessagesLatest(N)` 最新 N（`Cursor.Last()` 倒序取 N + 反转升序）。taskNEXT Phase 2 已列 messages 分页。
+- **触发**：Phase 2 messages 分页（公网部署前必须，>50 条读历史坏）。
+
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 
 - **`cmd/` 布局** —— 加 reset-key CLI / 多二进制时升级（当前单 main.go 在根够用）。

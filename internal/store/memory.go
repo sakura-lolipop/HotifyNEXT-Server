@@ -145,6 +145,22 @@ func (m *Memory) MessagesSince(since uint64, limit int) ([]model.Message, error)
 	return out, nil
 }
 
+// MessagesLatest（Memory 实现，语义同 BBolt；TD-19）。messages 升序（HLC 单调），取末尾 limit = 最新 limit。
+func (m *Memory) MessagesLatest(limit int) ([]model.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := []model.Message{}
+	start := 0
+	if len(m.messages) > limit {
+		start = len(m.messages) - limit
+	}
+	out = append(out, m.messages[start:]...)
+	return out, nil
+}
+
 func (m *Memory) Message(hlc uint64) (model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
