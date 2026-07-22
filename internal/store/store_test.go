@@ -207,13 +207,29 @@ func TestBBolt_MessagesSince_OpenInterval(t *testing.T) {
 }
 
 func TestBBolt_MessagesSince_Limit(t *testing.T) {
+	// since=0（无游标）→ 最新 N（TD-19）：存 10 条 m0..m9，Since(0,3) 返最新 3 升序 m7,m8,m9
 	st := newTestBBolt(t)
 	for i := 0; i < 10; i++ {
-		st.SaveMessage(model.Message{Category: "default"})
+		st.SaveMessage(model.Message{Category: "default", Body: fmt.Sprintf("m%d", i)})
 	}
 	got, _ := st.MessagesSince(0, 3)
 	if len(got) != 3 {
-		t.Errorf("limit=3: got %d, want 3", len(got))
+		t.Fatalf("limit=3: got %d, want 3", len(got))
+	}
+	if got[0].Body != "m7" || got[2].Body != "m9" {
+		t.Errorf("since=0 最新3: got %q..%q, want m7..m9（最老 m0..m6 排除）", got[0].Body, got[2].Body)
+	}
+}
+
+// TestBBolt_MessagesSince_Since0_Limit0 不限（since=0 limit=0 → 全部升序，BigEndianOrdering 同验但显式标 since=0 语义）
+func TestBBolt_MessagesSince_Since0_Limit0(t *testing.T) {
+	st := newTestBBolt(t)
+	for i := 0; i < 5; i++ {
+		st.SaveMessage(model.Message{Category: "default", Body: fmt.Sprintf("m%d", i)})
+	}
+	got, _ := st.MessagesSince(0, 0) // limit=0 不限 → 全部 5 升序
+	if len(got) != 5 || got[0].Body != "m0" || got[4].Body != "m4" {
+		t.Errorf("since=0 limit=0: len=%d first=%q last=%q, want 5/m0/m4（全部升序）", len(got), got[0].Body, got[4].Body)
 	}
 }
 

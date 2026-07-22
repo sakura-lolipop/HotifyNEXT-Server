@@ -310,33 +310,57 @@ func (s *BBolt) SaveMessage(m model.Message) (uint64, error) {
 	return assignedHLC, err
 }
 
-// MessagesSince 返回 since 之后的消息（开区间，升序旧→新）。since=0 从最老扫；limit<=0 不限。
+// MessagesSince 返回消息（升序 旧→新），按 HLC 游标语义：
+//   - since=0（无游标）→ 最新 N（client 默认收最新；Cursor.Last 倒序 N + 反转升序）。修 TD-19
+//     （原 since=0 c.First 从最老扫返最老 N 的 CP1 临时 bug，DB>N 读不回新消息）。
+//   - since>0 → since 之后升序（开区间跳 since；补漏增量）。
+//
+// limit<=0 不限。坏 JSON 返 err 不吞（CLAUDE.md ④——不把"扫描遇坏"伪装"该条不存在"）。
 func (s *BBolt) MessagesSince(since uint64, limit int) ([]model.Message, error) {
-	out := []model.Message{} // 非 nil 空 slice（同 AllDevices：返 [] 不返 null）
+	out := []model.Message{} // 非 nil 空 slice（返 [] 不返 null）
 	err := s.db.View(func(tx *bolt.Tx) error {
 		c := tx.Bucket([]byte(bucketMsgs)).Cursor()
+		// unmarshal + corrupt err 不吞（坏 JSON 返 err 不静默跳）
+		unmarshal := func(key, val []byte) (model.Message, error) {
+			var msg model.Message
+			if err := json.Unmarshal(val, &msg); err != nil {
+				return model.Message{}, fmt.Errorf("msgs bucket corrupt at hlc=%d: %w", binary.BigEndian.Uint64(key), err)
+			}
+			return msg, nil
+		}
+		if since == 0 {
+			// since=0（无游标）→ 最新 N：Cursor.Last 倒序取 N（新→旧）+ 反转升序（旧→新）
+			reversed := []model.Message{}
+			for key, val := c.Last(); key != nil; key, val = c.Prev() {
+				if limit > 0 && len(reversed) >= limit {
+					break
+				}
+				msg, err := unmarshal(key, val)
+				if err != nil {
+					return err
+				}
+				reversed = append(reversed, msg)
+			}
+			for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
+				reversed[left], reversed[right] = reversed[right], reversed[left] // 反转升序（旧→新）
+			}
+			out = reversed
+			return nil
+		}
+		// since>0：since 之后升序（补漏增量；开区间跳 since 本身）
 		var seekKey [8]byte
 		binary.BigEndian.PutUint64(seekKey[:], since)
-
-		var k, v []byte
-		if since == 0 {
-			k, v = c.First() // 从最老扫
-		} else {
-			k, v = c.Seek(seekKey[:])
-			if k != nil && binary.BigEndian.Uint64(k) == since {
-				k, v = c.Next() // 开区间：跳过 since 本身
-			}
+		key, val := c.Seek(seekKey[:])
+		if key != nil && binary.BigEndian.Uint64(key) == since {
+			key, val = c.Next() // 开区间：跳过 since 本身
 		}
-		for ; k != nil; k, v = c.Next() {
+		for ; key != nil; key, val = c.Next() {
 			if limit > 0 && len(out) >= limit {
 				break
 			}
-			var msg model.Message
-			if err := json.Unmarshal(v, &msg); err != nil {
-				// 坏 JSON = db 损坏（SaveMessage 写入时 marshal 失败会事务回滚不落库；只有磁盘故障/schema 不兼容才会坏）。
-				// 不静默 continue（CLAUDE.md ④ 返回值纪律——不把"扫描遇坏"伪装"该条不存在"，否则客户端 since 补漏
-				// 会在空洞处无声挖洞 + 无信号）。返 error 让调用方决策（handleHistory 返 500，逼运维修 db）。
-				return fmt.Errorf("msgs bucket corrupt at hlc=%d: %w", binary.BigEndian.Uint64(k), err)
+			msg, err := unmarshal(key, val)
+			if err != nil {
+				return err
 			}
 			out = append(out, msg)
 		}

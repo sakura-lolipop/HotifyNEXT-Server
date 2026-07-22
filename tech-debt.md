@@ -128,6 +128,19 @@
 - **怎么修**：Server 启动 `cloud_function_urls` 空 → fetch Hotify 托管 `cloud_function_urls.txt`（同 legacy：ghproxy 加速 + 缓存 fallback），自托管用户 config.json override 自己的云函数 URL。zero-config 真推 + 自托管 override 兼容（Hotify 托管做默认/兜底，自托管 override）。
 - **触发**：CP5/CP6（zero-config pushkit 启用，方便自托管首装 + 复用 legacy 机制；CP4 联调手填 config 绕过）。
 
+### TD-19 ✅ handleHistory 最老 50 bug 修（CP4，用 HLC MessagesSince since=0）
+- **已修（2026-07-22）**：CP1 临时 handleHistory `MessagesSince(0,50)` since=0 从最老扫返最老 50（注释"最近 50"与实现相反，DB>50 读不回新消息，对抗测两 agent 钉）。
+- **修法（用 HLC 不新方法）**：`MessagesSince` since=0 改最新 N（Cursor.Last 倒序 N + 反转升序，client 默认收最新/无游标→最新 N）；since>0 增量不变（补漏）。handleHistory `MessagesSince(0,50)` 自动得最新 50。
+- **曾走弯路**：试 MessagesLatest(N) 新方法（屎山：DRY 重复 MessagesSince + 绕过 HLC 游标统一），用户纠正（「为啥不用 hlc」「YAGNI」）回退（ee5ea6e revert 040773c）改用 HLC MessagesSince since=0。
+- **完整 since=HLC 游标分页**（client 带 since 拉增量）仍 Phase 2（/api/v1/messages?since=）；CP4 修「默认最新 N」够用。
+
+### TD-20 harmony.go 屎山小项（2026-07-22 CP4 屎山扫描 P2，下次摸 harmony.go 随流清）
+- **P2-1 doPost 死返回值**：`doPost` 返 `(status, pushKitCode, diagMsg)` 三元，但 `postToCloudFunction` 拿 code 后 `_ = pushKitCode` 丢弃（code 已揉进 diagMsg）。签名过承诺误导 CP4.5 安卓作者。修：doPost 降 `(status, msg)`。
+- **P2-2 magic 16**（Ext 字段上限，harmony.go:109）未常量化（跟 Push Kit 4KB 换算关系丢失）。修：`const maxExtFields = 16` + 注释换算。
+- **P2-3 truncate/orVal DRY**：harmony.go 5 helper 跟 legacy `hotify-bridge/go/push.go` 逐字重复；`truncate`（rune 截断）+ `orVal`（空串兜底）是通用 string 工具锁 pushkit unexported，未来 server/store 用得再抄。修：提 util（跟 Mask 同理，TD-2 批）。`subscribeLabelEnabled`/`anyToCodeStr`/`readSnippet` push 专属留 pushkit。
+- **P3**：散落 magic（160 诊断 snippet / 1<<20 body）/ harmonySend ~78 行 borderline（clickData/dataObj 可抽 helper，CP4.5 安卓复用时）/ config.go:53 注释 stale（"留 CP4" 没兑现，改"pushkit 无启动校验空 URLs=禁用合法"）/ android.go apns.go stub `_ = msg`（改 `_ model.Message` 签名更干净）/ anyToCodeStr 单字母 `v`/`num`/ harmony.go:216 吞 io.ReadAll err（拼进 diagMsg）。
+- **触发**：下次摸 harmony.go（CP4.5 安卓 adapter 复用 fallback/retry 骨架前）随流清；P2-3 跟 TD-2 批。
+
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 
 - **`cmd/` 布局** —— 加 reset-key CLI / 多二进制时升级（当前单 main.go 在根够用）。

@@ -132,6 +132,16 @@ func (m *Memory) SaveMessage(msg model.Message) (uint64, error) {
 func (m *Memory) MessagesSince(since uint64, limit int) ([]model.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if since == 0 {
+		// since=0（无游标）→ 最新 N（client 默认收最新；修 TD-19 同 BBolt）
+		out := []model.Message{}
+		start := 0
+		if limit > 0 && len(m.messages) > limit {
+			start = len(m.messages) - limit
+		}
+		out = append(out, m.messages[start:]...) // messages 升序（HLC 单调），末尾 N = 最新 N 升序
+		return out, nil
+	}
 	out := []model.Message{}
 	for _, msg := range m.messages { // messages 升序（HLC 单调）
 		if msg.HLC <= since {
