@@ -4,6 +4,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -14,6 +15,15 @@ import (
 )
 
 func main() {
+	// 日志同时写 stdout（shell 实时 / systemd journal）+ hotify.log（持久保存，公网排障）。
+	// hotify.log 在 cwd（HotifyNEXT-Server/），*.log 已 .gitignore 挡。路径固定（config.log_file 留 Phase 2 如需多日志）。
+	logFile, err := os.OpenFile("hotify.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Fatalf("open hotify.log: %v", err)
+	}
+	defer logFile.Close() // graceful shutdown（CP6 SIGTERM）时关
+	log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+
 	cfg, err := config.Load("config.json")
 	if err != nil {
 		log.Fatalf("load config: %v", err)
