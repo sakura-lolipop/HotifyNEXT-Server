@@ -382,6 +382,30 @@ func TestBBolt_TouchDeviceSeen(t *testing.T) {
 	}
 }
 
+// TestBBolt_ClearPushToken 死 token 闸门落点（CP4 TD-4）：清 PushToken + 保留其他字段 + 不存在 ErrNotFound。
+func TestBBolt_ClearPushToken(t *testing.T) {
+	st := newTestBBolt(t)
+	st.RegisterDevice(model.Device{UUID: "u1", Platform: "harmony", PushToken: "tok1", Name: "phone"})
+	if err := st.ClearPushToken("u1"); err != nil {
+		t.Fatalf("ClearPushToken: %v", err)
+	}
+	got, err := st.GetDevice("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PushToken != "" {
+		t.Errorf("after clear: PushToken=%q, want empty", got.PushToken)
+	}
+	// mutateDevice 只清 token，不动 uuid/platform/name（防误删设备其他字段）
+	if got.UUID != "u1" || got.Platform != "harmony" || got.Name != "phone" {
+		t.Errorf("ClearPushToken 不应动其他字段: got %+v", got)
+	}
+	// 不存在 → ErrNotFound（不静默创建）
+	if err := st.ClearPushToken("nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("clear non-existent: got %v, want ErrNotFound", err)
+	}
+}
+
 // ── Cursor ──
 
 func TestBBolt_Cursor_Overwrite(t *testing.T) {
@@ -711,6 +735,22 @@ func TestMemory_ErrNotFound(t *testing.T) {
 	}
 	if _, err := st.Message(1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Message: %v", err)
+	}
+}
+
+// TestMemory_ClearPushToken Memory 语义同 BBolt（TD-4 CP4 死 token 闸门）。
+func TestMemory_ClearPushToken(t *testing.T) {
+	st := NewMemory()
+	st.RegisterDevice(model.Device{UUID: "u1", PushToken: "tok1"})
+	if err := st.ClearPushToken("u1"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetDevice("u1")
+	if got.PushToken != "" {
+		t.Errorf("Memory clear: PushToken=%q, want empty", got.PushToken)
+	}
+	if err := st.ClearPushToken("nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Memory clear non-existent: %v, want ErrNotFound", err)
 	}
 }
 

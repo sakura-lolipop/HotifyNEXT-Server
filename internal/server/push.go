@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/model"
+	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/pushkit"
 	"github.com/sakura-lolipop/HotifyNEXT-Server/internal/store"
 )
 
@@ -75,14 +76,28 @@ func (s *Server) ingest(msg model.Message) (uint64, error) {
 }
 
 // fanoutPush 推送单台（dev 已在 ingest GetDevice 验存在，签名收 dev 不再重复查）。
-// 推失败返 error（不 panic/fatal）——ingest/handler 据此决定响应。
-// 空 token 留痕不推（防静默 success 假绿；理论 register 校验非空，但 legacy/未来 DELETE 可能造空 token 设备）。
+// 返 nil=推成功或死token已清（消息已落库，handler 200）/ err=系统错（handler 200+push failed 留痕）。
+//   - 空 token：留痕不推（防静默 success 假绿；理论 register 校验非空，但 legacy/未来 DELETE 可能造空 token 设备）
+//   - 死 token（pushkit.ErrDeadToken，华为 80100000/80300007）：ClearPushToken 清 token（CP4 闸门），返 nil
+//   - 其他错（system_error/网络）：返 err（保留 token，下次新消息再推）
 func (s *Server) fanoutPush(msg model.Message, dev model.Device) error {
 	if dev.PushToken == "" {
 		log.Printf("[push] device %s empty push token, saved but not pushed", msg.TargetUUID)
 		return nil
 	}
-	return s.pusher.Send(msg, dev)
+	if err := s.pusher.Send(msg, dev); err != nil {
+		if errors.Is(err, pushkit.ErrDeadToken) {
+			// 死 token → 清 PushToken，防反复推死 token 浪费云函数/Push Kit 配额（CP4 死 token 闸门）。
+			if clearErr := s.st.ClearPushToken(dev.UUID); clearErr != nil {
+				log.Printf("[push] device %s dead token but ClearPushToken failed: %v (token kept)", dev.UUID, clearErr)
+			} else {
+				log.Printf("[push] device %s dead token, PushToken cleared", dev.UUID)
+			}
+			return nil // 死 token 非系统错：消息已落库，不挡（ingest 返 nil → handler 200 success）
+		}
+		return err // 其他推送错（system_error/网络）→ ingest 返 err，handler 决定（200 + push failed 留痕）
+	}
+	return nil
 }
 
 // handleAPIPush 原生推送端点（CP3b，Hotify App 主路径）。

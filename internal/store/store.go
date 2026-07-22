@@ -40,6 +40,8 @@ type Store interface {
 	RemoveDevice(uuid string) error              // DELETE 端点（Phase 2）
 	TouchDeviceSeen(uuid string) error           // WS 连/断更新 LastSeenAt（CP7）；不存在→ErrNotFound
 
+	ClearPushToken(uuid string) error // 死 token 闸门（CP4：pushkit ErrDeadToken → 清 PushToken 防反复推死 token）；不存在→ErrNotFound
+
 	// 消息（HLC key）
 	SaveMessage(m model.Message) (uint64, error)                    // 返回分配的 HLC
 	MessagesSince(since uint64, limit int) ([]model.Message, error) // since 之后升序（旧→新）；since=0 从最老；limit<=0 不限
@@ -230,6 +232,41 @@ func (s *BBolt) TouchDeviceSeen(uuid string) error {
 			return err
 		}
 		return b.Put([]byte(uuid), data)
+	})
+}
+
+// mutateDevice 读 device → fn 改 → 写回（TD-4 抽，CP4 提前：ClearPushToken 用）。
+// 设备必须已存在（不存在→ErrNotFound，不静默创建）；fn 内改 *model.Device 字段。
+// RegisterDevice 不用此（它 patch 语义 + 首注册创建，跟「已存在+改」语义不同）；
+// TouchDeviceSeen 的 Get→改→Put 骨架同源重复，留 Phase 2 顺流迁来（CP4 不夹带改已测代码）。
+func (s *BBolt) mutateDevice(tx *bolt.Tx, uuid string, fn func(*model.Device)) error {
+	bucket := tx.Bucket([]byte(bucketDevice))
+	raw := bucket.Get([]byte(uuid))
+	if raw == nil {
+		return ErrNotFound
+	}
+	var dev model.Device
+	if err := json.Unmarshal(raw, &dev); err != nil {
+		return err
+	}
+	fn(&dev)
+	data, err := json.Marshal(dev)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(uuid), data)
+}
+
+// ClearPushToken 清空设备 PushToken（TD-4，CP4 死 token 闸门落点）。
+// pushkit 返 ErrDeadToken（华为 80100000/80300007）→ fanoutPush 调此清 token，防反复推死 token
+// 浪费云函数/Push Kit 配额 + 日志噪声。设备不存在→ErrNotFound（不静默创建）。
+// RegisterDevice patch 跳过空串（store.go RegisterDevice 内 if d.PushToken!=""）故无法用它清 token，专用此方法。
+func (s *BBolt) ClearPushToken(uuid string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return s.mutateDevice(tx, uuid, func(dev *model.Device) {
+			dev.PushToken = ""
+			dev.UpdatedAt = time.Now()
+		})
 	})
 }
 

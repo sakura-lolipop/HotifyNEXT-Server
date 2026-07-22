@@ -1,9 +1,9 @@
 {
   "server": { "addr": ":25240" },
   "pushkit": {
-    "project_id": "",
-    "private_key_path": "private.json",
-    "region": "CN"
+    "cloud_function_urls": ["https://hotifypushkit.netlify.app/api/push"],
+    "cloud_function_token": "hotifypushkit",
+    "subscribe_label": "true"
   },
   "store": {
     "type": "bbolt",

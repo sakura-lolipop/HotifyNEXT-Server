@@ -99,6 +99,20 @@ func (m *Memory) TouchDeviceSeen(uuid string) error {
 	return nil
 }
 
+// ClearPushToken（Memory 实现，语义同 BBolt；TD-4 CP4 死 token 闸门）。调试/单测用。
+func (m *Memory) ClearPushToken(uuid string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	dev, ok := m.devices[uuid]
+	if !ok {
+		return ErrNotFound
+	}
+	dev.PushToken = ""
+	dev.UpdatedAt = time.Now()
+	m.devices[uuid] = dev
+	return nil
+}
+
 func (m *Memory) SaveMessage(msg model.Message) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

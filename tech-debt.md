@@ -14,6 +14,7 @@
 | **MVP 后工程化批次** | TD-6（CI + golangci-lint）+ TD-7（版本注入） | CP6（Phase 1 MVP 收尾）后 | 迭代期 churn 快 CI 噪声大反碍事；MVP 稳定后上自动门防回归 + 分发排错要版本号（2026-07-21 架构评估记） |
 | **CP4 批次** | TD-12（msg.URL 协议白名单） | CP4（pushkit 搬，接 clickAction 前） | CP3c 两边（bark+native）裸收 url 未校验；CP4 pushkit 喂 clickAction.data 前必须加协议白名单（http/https/app scheme）防 javascript:/file: 跳转（XSS/钓鱼/本地文件泄露，CP3c 对抗审 B P2） |
 | **CP6 批次** | TD-8（client 契约文档）+ TD-9（fanoutPush sentinel） | CP6（部署就绪） | client 接 API 要错误码契约文档；fanoutPush 全广播扇出前补 sentinel 防五分支语义糊（CP3b 屎山审 P2-3） |
+| **CP4 审查延后** | TD-14（同步 push 阻塞/异步化）+ TD-15（5xx 重试范围）+ TD-16（harmony 小项）+ TD-17（补测） | 各自触发条件（见下） | 都不 compound（无人在其上建上层假设）；TD-14/15 撞事故/实测卡顿再动；TD-16/17 摸 harmony.go 时随流。**P1（notifyId 幂等）CP4 即时修不入库**——注释自称已做实际空实现，CP5/CP6 要建在其上，属"假地基"必须现在清 |
 
 **不清在 CP2**：CP2 已验证完成（`go test ./...` + `go vet` 全绿），混入重构违反"不混改"纪律；TD-1 现在 do 不了（CP3 端点重排依赖）；TD-3 在 CP3 开头做时上下文一样热（CP3 就是写端点、碰 envelope 的时候），现在做无 warmth 优势反冒"改坏已验证代码"险。
 
@@ -97,6 +98,35 @@
 - **现状兜底**：main.go 启动告警 `[WARN] FIFO eviction not implemented; max_bytes advisory`（CP3c 加，让运维知晓 + 单用户可信域泄露概率低接受）。
 - **怎么修**：SaveMessage 后检查 msgs 桶大小超 `max_bytes` → `Cursor.First()` 删最老 HLC → 回阈值；周期跑 `bbolt.Compact()` 回收空间。可选 per-IP token bucket 限流（`golang.org/x/time/rate`，零 CGO 已是项目约束）防 bark 写开放灌库。
 - **触发**：Phase 2 cleanup（CP6 MVP 后；公网部署前必须，否则磁盘崩）。
+
+### TD-14 push 异步化（避免云函数劣化阻塞 HTTP）（2026-07-22 CP4 对抗审 P2-2）
+- **现状**：`ingest → fanoutPush → pusher.Send → harmonySend` 全程同步。最坏（黑洞网络，每请求挂满 15s 超时）：单 URL 3×15s+2×1s≈47s，多 URL 翻倍。消息已先 SaveMessage 落库（不丢），但 HTTP 响应被拖住，单用户连发连续卡死。
+- **CP4 不做**：异步引 goroutine 生命周期 + 关机 in-flight push 丢失 + 乱序，比「卡 47s」更可能是新屎山源（对抗审二次屎山判据：现在清=自己造屎山）。单用户量级 + sync 是更简设计（过度工程倾向纪律）。
+- **怎么修（CP6 公网部署前评估）**：`SaveMessage` 后 `go s.fanoutPush(...)`（消息已落库，push best-effort，handler 立即 200）；或先调小 `harmonyHTTPTimeout=5s`（1 行）缓解。**默认不上异步**，真在生产被卡过再上。
+- **触发**：CP6（公网部署前评估，若实测卡顿）。
+
+### TD-15 5xx 重试范围 ✅（CP4 已修 2026-07-22，用户"小修方便直接修"覆盖原延后）—— doPost 502/503/504 → retry（CDN/网关瞬时），401/400/default(500) → system_error
+- **现状**：`harmony.go doPost` 非 200 分支——`502 → harmonyRetry`，`401/400/default(含 500/503/504) → harmonySystemError`（终态，不重试不 fallback）。但 docs §8.2 写「HTTP 500/其他 5xx: → SystemError（**重试**）」。代码只重试 502。
+- **为什么不 CP4 即修**：Netlify 云函数自身 500（private 未配/JSON parse 错）重试无用——这部分代码是合理的；真正 gap 是 CDN/网关瞬时 503/504 不重试。不 compound（无人在上层建假设），且 docs §8.2 与 §5.3 自身表述不一致需先统一再改码。
+- **怎么修**：重试条件放宽为「5xx 除 401/400 外均 retry」（401/400 是调用方配错，重试无益，留 system_error）；或最保守把 `default` 中 `>= 500` 归 retry。同步统一 docs §8.2/§5.3 表述。
+- **触发**：撞真 503/504 投递失败事故时，或 Phase 2 docs 统一批次。
+
+### TD-16 harmony.go 小项 ✅ CP4 已修 P3-1/P3-2（dead 折码 + Ext ts 过滤+数量上限；P3-4 RetryLimit 命名保持未改，可选）
+- **死码日志（P3-1）**：`doPost` dead 分支 `diagMsg = result.Msg` 没折 pushKitCode（system_error 分支折了），`postToCloudFunction` L159 注释自称「doPost 已把 code 融进 diagMsg（delivered/dead/system_error）」对 dead 是假的。日志/错误看不出 80100000（illegal token）vs 80300007（全无效）。修：dead 也 `fmt.Sprintf("code=%s msg=%s", pushKitCode, result.Msg)`。
+- **Ext 碰撞/size（P3-2）**：`harmonySend` dataObj 先放 ts 再 merge `msg.Ext`，`Ext["ts"]` 会覆盖 server 设的 ts；Ext 无 size 上限。**不影响点击跳转安全**——Ext 进 payload.data 顶层（delivery.md §5 不进 click），sanitize 后的 url 在独立 clickAction.data（安全）。修：merge 前跳过保留键 "ts"；可选给 dataBytes 设上限（超 3500B drop Ext）。
+- **命名（P3-4）**：`harmonyRetryLimit=3` 实为「总尝试 3 次」（1 初试 + 2 重试），非「重试 3 次」。docs §8.3「重试 3 次」字面 = 3 重试（4 总）。代码 + 测试一致取 3 总。可重命名 `harmonyMaxAttempts`。
+- **触发**：下次摸 harmony.go 随流清（都是局部小改，互不影响，不 compound）。
+
+### TD-17 harmony_test 补测 ✅ CP4 已全补（notifyId 稳定/401/400/subscribeLabel/no media_ids/all exhausted/dead-on-fallback/Ext ts；16 case 全绿）
+- **现状**：`harmony_test.go` 漏 ① HTTP 401/400 → system_error 两分支零覆盖（只测了 500）② media_ids 空时不塞 clickAction.data（代码 `if len>0` 对的，无回归保护）③ SubscribeLabel「订阅:」前缀（含 title 空→改 body 分支，零覆盖）④ 多 URL 全 exhausted（主+备都败→keep token）⑤ data 顶层/Ext 构造（received 捕获了整 body 但只断言 ClickAction.Data）⑥ 死码在 fallback URL 触发（主 502 用尽→备 80300007→ErrDeadToken）。
+- **注**：notifyId 幂等回归测试随 P1（notifyId 即时修）一并补，不在此 TD。此处是余下随流补的。
+- **触发**：下次摸 harmony_test.go 随流，或 CP4.5 安卓 adapter 复用 harmony fallback/重试骨架前（复用前先补齐主路径回归）。
+
+### TD-18 zero-config pushkit：自动拉 cloud_function_urls（2026-07-22 CP4 联调记）
+- **现状**：CP4 `cloud_function_urls` 空 → 调试模式（只存不推，pushkit=false）。要真推必须手填 config.json `cloud_function_urls`（联调就是手填 hotifypushkit.netlify.app）。
+- **legacy 对比**：Python 桥 `gotify_pushkit_bridge.py _fetch_cf_urls_from_txt`——`cloud_function_urls` 空时 fetch `cloud_function_urls.txt`（GitHub raw `raw.githubusercontent.com/sakura-lolipop/hotify-bridge/main/` + ghproxy.com 国内加速 → 本地缓存），自动拉 Hotify 托管 urls。**zero-config pushkit**（不配也能真推，用 Hotify 托管云函数）。
+- **怎么修**：Server 启动 `cloud_function_urls` 空 → fetch Hotify 托管 `cloud_function_urls.txt`（同 legacy：ghproxy 加速 + 缓存 fallback），自托管用户 config.json override 自己的云函数 URL。zero-config 真推 + 自托管 override 兼容（Hotify 托管做默认/兜底，自托管 override）。
+- **触发**：CP5/CP6（zero-config pushkit 启用，方便自托管首装 + 复用 legacy 机制；CP4 联调手填 config 绕过）。
 
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 

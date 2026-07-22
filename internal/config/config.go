@@ -1,5 +1,5 @@
 // 配置加载：从 config.json 读（缺失文件用默认值，便于调试期无配置启动）。
-// 真实 config.json 含机密（服务账号私钥路径、project_id）→ .gitignore 已挡，不入库。
+// config.json 含云函数入口 URL + AUTH_TOKEN（CP4 云函数中转；私钥锁云函数不在 Server）→ .gitignore 挡，不入库。
 // 模板见 ../../config.example.json。
 //
 // ⚠️ 改 config 需重启——无热更新（docs/NEXT-Server.md §8 管理走 CLI/SSH，重启生效）。

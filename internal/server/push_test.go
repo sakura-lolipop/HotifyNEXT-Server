@@ -350,20 +350,89 @@ func TestAPIPush_MediaIDsSatisfiesRequired(t *testing.T) {
 	}
 }
 
-// TestAPIPush_RealPushkitFail pushkit stub 真 Send 失败路径（漏测 #4：ProjectID 非空 → Send 返 not implemented）。
-// 非 failPusher mock，走 fanoutPush default→*pushkit.Client.Send 真分支。
+// TestAPIPush_RealPushkitFail 真 pushkit harmonySend 失败路径（CP4：mock 云函数返 500 → system_error → 200 + push failed）。
+// 走 fanoutPush → *pushkit.Client.Send → harmonySend 真分支（非 failPusher mock）。
 func TestAPIPush_RealPushkitFail(t *testing.T) {
-	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{ProjectID: "fake"}))
+	// mock 云函数返 500（system_error 立即终态，不重试）→ harmonySend 返 err（保留 token，非死 token）
+	cloudFunc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer cloudFunc.Close()
+	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{CloudFunctionURLs: []string{cloudFunc.URL}}))
 	key1 := registerFirstSet(t, ts, "dev1")
 	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
 	defer resp.Body.Close()
-	// dev1 注册（tok-dev1 非空）→ fanoutPush default → pushkit.Send（ProjectID=fake）→ not implemented err
+	// dev1 harmony + tok-dev1 → fanoutPush → harmonySend → POST mock 云函数 500 → system_error err
 	if r.Code != 200 || !strings.Contains(r.Message, msgPushFailed) {
 		t.Errorf("real pushkit fail: code=%d msg=%q (want 200 + push failed)", r.Code, r.Message)
 	}
 	msgs, _ := bb.MessagesSince(0, 10)
 	if len(msgs) != 1 {
 		t.Errorf("msgs: %d (want 1, 推失败不挡落库)", len(msgs))
+	}
+}
+
+// TestAPIPush_RealDelivered 端到端成功（CP4 全链路）：真 pushkit harmonySend（mock 云函数 80000000）
+// → 消息落 msgs 桶（HLC key）+ 200 success + token 保留。验「消息进 server→存对位置→推送成功」全链路。
+func TestAPIPush_RealDelivered(t *testing.T) {
+	cloudFunc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":"80000000","msg":"Success"}`))
+	}))
+	defer cloudFunc.Close()
+	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{CloudFunctionURLs: []string{cloudFunc.URL}}))
+	key1 := registerFirstSet(t, ts, "dev1")
+	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
+	defer resp.Body.Close()
+	if r.Code != 200 || strings.Contains(r.Message, msgPushFailed) {
+		t.Errorf("delivered: code=%d msg=%q (want 200 success)", r.Code, r.Message)
+	}
+	// token 保留（delivered 不清）
+	dev, err := bb.GetDevice("dev1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dev.PushToken != "tok-dev1" {
+		t.Errorf("dev1 PushToken=%q, want tok-dev1 (delivered 保留)", dev.PushToken)
+	}
+	// 消息落 msgs 桶（存对位置）
+	msgs, err := bb.MessagesSince(0, 10)
+	if err != nil || len(msgs) != 1 {
+		t.Errorf("msgs: len=%d err=%v (want 1 落库)", len(msgs), err)
+	}
+	if len(msgs) == 1 && msgs[0].HLC == 0 {
+		t.Errorf("msgs[0].HLC=0, want 非0（HLC 时钟正确）")
+	}
+}
+
+// TestAPIPush_RealDeadTokenClears 端到端死 token 闸门（CP4）：真 pushkit harmonySend（mock 云函数 80300007 dead）
+// → ErrDeadToken → fanoutPush ClearPushToken 清 token + 消息落库 + 200 success（非 push failed）。
+func TestAPIPush_RealDeadTokenClears(t *testing.T) {
+	cloudFunc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":"80300007","msg":"all tokens invalid"}`)) // 全 token 无效 → dead
+	}))
+	defer cloudFunc.Close()
+	ts, bb := newPushServer(t, pushkit.New(pushkit.Config{CloudFunctionURLs: []string{cloudFunc.URL}}))
+	key1 := registerFirstSet(t, ts, "dev1")
+	resp, r := apiPush(t, ts.URL, key1, `{"body":"b","target_uuid":"dev1"}`)
+	defer resp.Body.Close()
+	// 死 token 清后 → 200 success（非 push failed）
+	if r.Code != 200 || strings.Contains(r.Message, msgPushFailed) {
+		t.Errorf("real dead token: code=%d msg=%q (want 200 success, token cleared)", r.Code, r.Message)
+	}
+	// dev1 PushToken 被清（ClearPushToken 闸门）
+	dev, err := bb.GetDevice("dev1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dev.PushToken != "" {
+		t.Errorf("dev1 PushToken=%q, want empty (ClearPushToken by dead token gate)", dev.PushToken)
+	}
+	// 消息仍落库（死 token 不挡落库）
+	msgs, _ := bb.MessagesSince(0, 10)
+	if len(msgs) != 1 {
+		t.Errorf("msgs: %d (want 1, dead token 不挡落库)", len(msgs))
 	}
 }
 

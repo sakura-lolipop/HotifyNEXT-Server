@@ -1,10 +1,17 @@
-// 华为 Push Kit 客户端：服务账号 JWT 直当 Bearer → /v3/{project_id}/messages:send。
-// 鉴权逻辑照 legacy Python 桥（../hotify/gotify_pushkit_bridge.py 的 get_bearer_token）移植——
-// ⚠️ 决策#2：JWT 直当 Bearer，**不换 access_token**（旧桥走过弯路，已纠正）。
-// 当前为架构占位：Send 是 TODO（需移植 JWT 签名 + v3 请求体），project_id 为空时静默跳过（调试模式）。
+// 华为 Push Kit 推送（云函数中转，CP4）。
+//
+// ⚠️ 方向纠正（CP4）：legacy 实际是「云函数中转」——服务账号 RSA 私钥 / PS256 JWT 锁在云函数
+// （hotifypushkit.netlify.app），本 Server 只 POST 云函数（带 token + notification），云函数签 JWT +
+// 调华为 Push Kit v3 + 转发返回码。旧注释「JWT 直签 / 移植 Python 桥 get_bearer_token」是过时幻觉
+// （get_bearer_token 早删——pushkit-transport.md §10.1；Python 桥 L13「桥不再直连 Push Kit」）。
+//
+// 多平台分派（Send switch dev.Platform）：harmony→云函数中转（CP4 真做）/ android(HMS)→stub
+// （CP4.5）/ ios+macos→APNs stub（待 Apple 开发者账号）/ default→ErrUnknownPlatform。
+// 加平台 = 加 adapter 文件 + case，不动 Pusher interface（CP3b 宽签名 Send(msg,dev) 已 ready）。
 package pushkit
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
@@ -13,48 +20,66 @@ import (
 )
 
 // huaweiCategory 华为 notification.category 固定 SUBSCRIPTION（已过审 2026-07-02）。
-// 业务 category（call/sms/verify/...）走 msg.Category → PushKit clickAction.data（CP4），不碰 notification.category。
-// 自用绕频控走 pushOptions.testMessage（CP4 实装），非 category。
+// 业务 category（call/sms/verify/...）走 msg.Category → clickAction.data（不碰 notification.category）。
 const huaweiCategory = "SUBSCRIPTION"
 
+// 推送结果哨兵（CP4）。server.fanoutPush 据 ErrDeadToken 调 ClearPushToken 清死 token。
+var (
+	// ErrDeadToken 设备 PushToken 失效（华为 80100000/80300007）→ server ClearPushToken 清 token 防反复推。
+	ErrDeadToken = errors.New("push token dead (huawei 80100000/80300007)")
+	// ErrUnknownPlatform dev.Platform 不在支持集（harmony/android/ios/macos）。
+	ErrUnknownPlatform = errors.New("unknown device platform")
+	// ErrNotImplemented 该平台 adapter 未实装（android HMS = CP4.5；apns 待 Apple 开发者账号）。
+	ErrNotImplemented = errors.New("platform push not yet implemented")
+)
+
+// Config 云函数中转配置（CP4，对齐 legacy hotify-bridge/go/config.go）。
+// 私钥不在此（锁云函数）；Server 只持云函数入口 URL + AUTH_TOKEN（非机密，可入 config）。
 type Config struct {
-	ProjectID      string `json:"project_id"`       // 华为项目 ID（push API URL 路径用）
-	PrivateKeyPath string `json:"private_key_path"` // 服务账号 JSON 路径（含 RSA 私钥/key_id/sub_account）
-	Region         string `json:"region"`           // "CN"（仅中国境内，不含港澳台）
+	CloudFunctionURLs  []string `json:"cloud_function_urls"`  // 云函数入口（1-n 个 fallback；空=推送禁用，只存不推）
+	CloudFunctionToken string   `json:"cloud_function_token"` // 云函数 AUTH_TOKEN（防爬虫非防推送；空=云函数没开鉴权）
+	SubscribeLabel     string   `json:"subscribe_label"`      // "true" 给标题加"订阅:"前缀（华为 SUBSCRIPTION 类目要求）；New 默认 "true"
 }
 
+// Client pushkit 客户端（多平台分派）。
 type Client struct {
 	cfg Config
-	// TODO: 缓存的 JWT + 过期时间（JWT 有 exp，过期重签；参考 Python 桥 _bearer 缓存）
 }
 
+// New 建 pushkit 客户端。SubscribeLabel 空→默认 "true"（华为 SUBSCRIPTION 要求）；CloudFunctionURLs 空→Send 静默跳过。
 func New(cfg Config) *Client {
-	if cfg.ProjectID == "" {
-		log.Printf("[pushkit] project_id 为空 → Send 静默跳过（调试模式，只存不推）")
+	if cfg.SubscribeLabel == "" {
+		cfg.SubscribeLabel = "true" // 默认加"订阅:"前缀（对齐 legacy；华为 SUBSCRIPTION 类目要求标题/正文带订阅字样）
+	}
+	if len(cfg.CloudFunctionURLs) == 0 {
+		log.Printf("[pushkit] cloud_function_urls 为空 → Send 静默跳过（调试模式，只存不推）")
 	}
 	return &Client{cfg: cfg}
 }
 
-// Send 推送消息到设备（CP3b 宽签名：收完整 Message + Device）。
-// 宽签名让 pushkit 能用所有字段（url→clickAction.data、msg.Category→业务分类、Ext→未来字段），
-// 鸿蒙 PushKit API 升级（v3→v4）或加新能力 = 改本函数，不动 Pusher 接口（plan「扩展性三层」）。
+// Send 推送消息到设备（Pusher 宽签名，CP3b）。按 dev.Platform 分派到平台 adapter。
+//   - 调试模式（CloudFunctionURLs 空）/ 无 token → 静默跳过（返 nil，双保险——fanoutPush 已挡空 token）
+//   - harmony → harmonySend 云函数中转（CP4 真做）
+//   - android → HMS Push v1 stub（CP4.5）；ios/macos → APNs stub（待 Apple 账号）
+//   - 未知 platform → ErrUnknownPlatform
 //
-// TODO 实现真实推送（CP4 移植自 Python 桥）：
-//  1. 签 JWT：header {kid, typ:JWT, alg:PS256}、payload {iss:sub_account, aud, iat, exp}（**无 sub**）；
-//     用 private.json 的 RSA 私钥，PS256 签名。
-//  2. JWT 直接当 Authorization: Bearer（**不调 oauth2/v3/token 换 access_token**——旧桥走过这弯路）。
-//  3. POST https://push-api.cloud.huawei.com/v3/{project_id}/messages:send
-//     body: target{token:[dev.PushToken]} + payload{notification{title:msg.Title, body:msg.Body,
-//     category:huaweiCategory, clickAction{actionType:0, data: msg.Category+msg.URL}}
-//     + pushOptions{testMessage:true|false}}
-//     header: push-type:0；成功码 80000000；死 token 80100000/80300007 删（CP4 全局闸门）。
-//
-// CP3 stub：ProjectID 空 / dev.PushToken 空 → 静默跳过（return nil）；否则返 not implemented。
+// 返 nil=delivered / ErrDeadToken=死token（fanoutPush→ClearPushToken）/ 其他 err=系统错（保留 token）。
 func (c *Client) Send(msg model.Message, dev model.Device) error {
-	if c.cfg.ProjectID == "" || dev.PushToken == "" {
-		return nil // 调试模式 / 无 token：静默跳过
+	if len(c.cfg.CloudFunctionURLs) == 0 {
+		return nil // 调试模式：只存不推
 	}
-	log.Printf("[pushkit] TODO Send → token=%s title=%q cat=%s url=%s",
-		util.Mask(dev.PushToken), msg.Title, msg.Category, msg.URL)
-	return fmt.Errorf("pushkit.Send not yet implemented（待 CP4 从 Python 桥移植 JWT+v3）")
+	if dev.PushToken == "" {
+		return nil // 无 token 不推（fanoutPush 已挡，双保险）
+	}
+	switch dev.Platform {
+	case "harmony":
+		return c.harmonySend(msg, dev)
+	case "android":
+		return c.androidSend(msg, dev)
+	case "ios", "macos":
+		return c.apnsSend(msg, dev)
+	default:
+		log.Printf("[pushkit] unknown platform=%s device=%s token=%s", dev.Platform, dev.UUID, util.Mask(dev.PushToken))
+		return fmt.Errorf("%w: %s", ErrUnknownPlatform, dev.Platform)
+	}
 }

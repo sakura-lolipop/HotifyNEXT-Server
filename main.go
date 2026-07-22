@@ -59,7 +59,7 @@ func main() {
 	pusher := pushkit.New(cfg.PushKit)
 	srv := server.New(cfg, st, pusher)
 	log.Printf("HotifyServer listening on %s (store=%s, pushkit=%t)",
-		cfg.Server.Addr, cfg.Store.Type, cfg.PushKit.ProjectID != "")
+		cfg.Server.Addr, cfg.Store.Type, len(cfg.PushKit.CloudFunctionURLs) > 0)
 	if err := srv.Run(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
