@@ -22,6 +22,31 @@
 - 之前 `go run` background 只写临时 task output 文件（不 shell 实时 + 不持久）。io.MultiWriter 一次兜住两份。
 - 路径固定 `hotify.log`（config.log_file 留 Phase 2 如需多日志/路径可配）。
 
+## 日志纪律（写代码时 checklist）
+
+写代码打 log 守这些（CLAUDE.md 返回值纪律④ 的日志面，防「吞状态」屎山重蹈）：
+
+1. **不吞状态**（核心）：关键路径返 nil/err 必有 log——排障知「发生了什么」。判断：这路径返 nil/err 时，运维 grep log 能不能还原「谁/啥/成败」？不能 = 吞状态，补 log。
+   - 反例（已修）：logReq 旧只 method/path/duration 吞 status（P1 修，加 statusRecorder）；ingest 存库成功无 hlc 留痕 + 调试模式黑洞（P2-2 修，[push] saved hlc）。
+
+2. **归因字段必带**（grep 跨层）：log 带 `hlc/uuid/status/code/remoteAddr` 等可 grep 字段，跨层串（`[http] status → [push] saved hlc=N → [pushkit] hlc=N` 同一消息全程 grep `hlc=N`）。
+   - 反例（已修）：[pushkit] 旧只 uuid 不带 hlc（P2-3 补四终态）；retry 行漏 hlc（P2-5 补 postToCloudFunction 加 hlc 参数）；[push] 下游 empty-token/dead-cleared 缺 hlc（P2-6 补）。
+
+3. **err 落 log（500）**：writeAPIError/writeBark `status>=500` 必 log msg（间歇磁盘/bbolt 坏第一次就抓，不靠 client 回贴响应体）。P2-4。
+
+4. **噪音判断**（打 vs 不打）：
+   - **必打**（关键事件）：请求 access log（`[http]` 每请求）/ 推送结果（`[pushkit]` 五态）/ 存库（`[push] saved`）/ 错误（`[server] 500` / `[push] device-not-found`）/ 死 token 清理 / 启动告警（`[WARN]`）。
+   - **不打**（够的别加，防过度日志）：`[push] success`（`[pushkit] ✓` 已记，**别双打**）/ store 层零 log（err 冒泡上层 log，store 不自打）/ 正常路径每步（噪音）。
+   - access log 公网扫描刷量 = access log 职责（**收集层过滤/采样，不在源端省**）。
+
+5. **不打 body**（泄露）：access log **不打请求 body**（bark-server 反面教材——打 body = 推送内容泄露）。Hotify 保持。
+
+6. **token 脱敏**：token 进 log 必 `util.Mask`（首4…末4），不泄露。
+
+7. **格式 + 输出**：`[tag] key=val` stdlib log（不上 json/logrus/slog——单用户低 QPS grep 够；将来要级别首选 Go 1.21+ `log/slog` 不引第三方）。`io.MultiWriter(stdout + hotify.log)` 持久（见上「输出」段）。
+
+8. **每 CP 派日志审查 agent**（防漏吞状态）：CP 写完派 agent 验日志输出（起 Server + curl 各路径 + 看 log + 找吞状态/归因断链/噪音）。CP4 首次做（验证 P1/P2 PASS + 补 retry/下游 hlc）。
+
 ## 日志清单（按 tag）
 
 ### `[http]`（logReq 中间件，每请求一条 access log）
