@@ -16,8 +16,13 @@
 
 ## 帧契约（TD-8 提前到 CP5）
 `wsFrame` JSON **文本帧**（ArkTS `on('message')` value:string 可 `JSON.parse`）：
-- `type`: `auth`（client→server 首帧）/ `auth_ack`（server→client 鉴权结果）/ `message`（server→client 新消息/补漏统一）
+- `type`: `auth`（client→server 首帧）/ `auth_ack`（server→client 鉴权结果）/ `message`（server→client 新消息/补漏统一）/ `key_update`（server→client，key2 下发，见下）
 - message 帧：`{type:"message", hlc:"N", message:{...}}`（顶层 hlc 归因 + msg.hlc；`json:"hlc,string"` 防精度）
+- **key_update 帧**（key2 下发，ARCHITECTURE §鉴权「key2 可下发」）：`{type:"key_update", key2:"新key2"}`。
+  - 触发：`POST /api/v1/keys` modify key2 / CLI reset key2 → broadcast key_update 给 onlineSet（在线设备自动更新 share URL 缓存，无感）。
+  - 设备：① 后台收 key_update → 更新 share URL 缓存；② **打开 share URL 页面强制刷新** `GET /api/v1/keys` 拉最新 key2（双保险，无 bug——窗口内/offline 兜底）。
+  - **key1 不走 key_update**（key1 参与连接鉴权，下发高危——已连状态混乱/时序 401/泄露方收无效，见 ARCHITECTURE §鉴权）。
+  - **CP5 帧 type 预留**（常量 `frameKeyUpdate`）+ broadcast 复用 broadcastMessage；**实装在 Phase 2 管理 API（改 key2）时 broadcast**。CP5 不实装 broadcast 触发（Phase 2 管理 API 才调）。
 - **不带 requestId**（推场景非 RPC；client 的 since 是握手参数）
 - 心跳用 **ArkTS 内置 ping/pong**（不自定义帧）；gorilla `SetReadDeadline(pongWait)` 检死连
 
