@@ -20,6 +20,31 @@
 
 **CP3 启动 checklist**：① 先翻本文件 → ② 清 TD-3（建 envelope 类型）→ ③ 写端点过程中随流清 TD-4。
 
+## CP4 后 tech-debt 现状（2026-07-22 落盘）
+
+**CP4 已清**：TD-3（envelope，CP3）/ TD-4（mutateDevice+ClearPushToken，CP4）/ TD-5（bark 9 缺口，CP3）/ TD-12（sanitize，CP4）/ TD-15（5xx retry 放宽，CP4）/ TD-16（harmony 小项 P3-1/P3-2，CP4）/ TD-17（补测，CP4）/ TD-19（handleHistory HLC MessagesSince since=0，CP4）。
+
+**待清**（按触发 + 性质）：
+
+| TD | 触发 | 性质 |
+|---|---|---|
+| TD-1 文件拆分 | Phase 2 cleanup | 静态 DRY，不炸 |
+| TD-2 saveKeys DRY | Phase 2（跟 TD-20 truncate/orVal 同批） | 静态 DRY |
+| TD-6 CI + golangci-lint | CP6（MVP 后） | 回归门 |
+| TD-7 版本注入 | CP6 后 / 分发 | 排错 |
+| TD-8 client 契约文档 | CP5 WS 帧契约已沉淀 stream.go 注释，错误码完整文档仍 CP6 | client 契约 |
+| TD-9 fanoutPush sentinel | **CP6（全广播扇出前必须）** | **会炸**（五分支语义糊） |
+| TD-10 SaveMessage 签名 | CP5/CP6 refactor | 跨 CP 签名 |
+| TD-11 pk→pusher | Phase 2（跨审已改 pusher） | 命名 ✅? |
+| TD-13 FIFO 空间阈值 | **Phase 2（公网部署前必须）** | **会炸**（bark 写开放灌磁盘崩） |
+| TD-14 异步推送 | CP6（公网前评估，默认不异步） | 会炸（引并发坑，屎山 agent 说现在清反造屎山） |
+| TD-18 cloud_function_urls 自动拉 | CP5/CP6（zero-config pushkit） | 便利 |
+| TD-20 harmony 屎山（doPost 返回值/magic 16/truncate-orVal） | Phase 2（摸 harmony.go 随流） | 静态 DRY/小修 |
+
+**会炸的（公网前必清，触发明确）**：TD-13 FIFO（磁盘）/ TD-9 fanoutPush sentinel（CP6 全广播）/ TD-14 异步（CP6 评估）。
+**静态 DRY/小修（不炸，Phase 2 批）**：TD-1/2/10/11/20。
+**工程化（CP6 后）**：TD-6 CI / TD-7 版本。
+
 ## 债
 
 ### TD-1 store.go / server.go 文件拆分（CP2 后记，2026-07-21）
