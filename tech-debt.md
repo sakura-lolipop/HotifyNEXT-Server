@@ -4,7 +4,14 @@
 
 ## 清理排期（2026-07-21 定，屎山审查后）
 
-**原则**：会长的债（compound / error-prone）下一个 CP 开头清，别让它长；不长的静态 DRY 批到 cleanup 批次；自然发生的随流清。
+**原则（屎山清理规则，2026-07-22 强化，全仓扫 agent 确认 TD 完整后定）**：
+1. **判据三档**（什么算屎山 + 记 TD + 何时清）：
+   - **会长的（compound / error-prone）**：不清会被后来者踩着建上层（假地基/语义糊/会炸）。记 TD + **下个 CP 开头清**（上下文热 + 防 CP 间扩散）。实例：TD-3 envelope / TD-9 fanout sentinel / TD-19 handleHistory。
+   - **不长的（静态 DRY / 命名 / 小修）**：不 compound，没人建上层。记 TD + **Phase 2 批**（省 context-switch）。实例：TD-1/2/20/21。
+   - **自然发生的**：写代码顺手遇。**随流清**（不专门开 CP）。实例：TD-4 mutateDevice（CP4 加 ClearPushToken 顺抽）。
+2. **时机触发**：会长的下个 CP 开头清；**公网前必清（会炸）**TD-13 FIFO / TD-9 fanout / TD-14 异步评估；静态 DRY Phase 2 批（同批省上下文：TD-2+TD-20 truncate/orVal+TD-21）；工程化（CI/版本）CP6 MVP 后；随流摸到顺手。
+3. **不清的（YAGNI / 不过度，memory over-engineering）**：单用户低 QPS 不引复杂机制（异步推送 goroutine 池/分布式/无感轮换）；不 compound 的预防机制（平滑/重叠期）；用户「砍/简单」优先评估。
+4. **纪律（coop §2 + CLAUDE.md）**：CP 只做功能不夹带重构（屎山清排 Phase 2/摸到随流，不在功能 CP 清无关屎山——用户忌混改）；会长的下个 CP 开头清别让它长；每 CP 改动派 agent 扫 + 跨 CP 系统审 + **全仓遗漏扫**（确认 tech-debt 完整，2026-07-22 首次全仓扫确认 TD-1..21 无会炸遗漏）。
 
 | 批次 | 债 | 何时 | 理由 |
 |---|---|---|---|
@@ -106,9 +113,8 @@
 - **怎么修**：`SaveMessage(msg *model.Message) error` 或 `(model.Message, error)` 返刷新后的 msg。
 - **触发**：CP5/CP6 refactor（跨 CP store 签名变更）。
 
-### TD-11 pk→pusher 字段名（2026-07-21 CP3b 屎山审 P3-6）
-- **现状**：`Server.pk` 字段名偏紧（2 字母），`pusher` 更可读（8 处引用）。
-- **触发**：Phase 2 cleanup（改名机械，批处理）。
+### TD-11 pk→pusher 字段名 ✅ done（2026-07-22 全仓扫确认）
+- **现状**：`Server.pk` → `pusher` 已改（server.go:31 `pusher Pusher`，全仓 grep `pk\b`/`.pk\b` 零命中，push.go:91 `s.pusher.Send`）。全仓扫 agent 2026-07-22 确认 done。
 
 ### TD-12 msg.URL 协议白名单（2026-07-21 CP3c 对抗审 B P2）
 - **现状**：`msg.URL`（bark `url` + 原生 `url` 两边都收）**无协议白名单 / 长度上限 / host 校验**。CP4 计划把 `msg.URL` 喂给 PushKit `clickAction.data`——鸿蒙端点通知跳转。
@@ -165,6 +171,12 @@
 - **P2-3 truncate/orVal DRY**：harmony.go 5 helper 跟 legacy `hotify-bridge/go/push.go` 逐字重复；`truncate`（rune 截断）+ `orVal`（空串兜底）是通用 string 工具锁 pushkit unexported，未来 server/store 用得再抄。修：提 util（跟 Mask 同理，TD-2 批）。`subscribeLabelEnabled`/`anyToCodeStr`/`readSnippet` push 专属留 pushkit。
 - **P3**：散落 magic（160 诊断 snippet / 1<<20 body）/ harmonySend ~78 行 borderline（clickData/dataObj 可抽 helper，CP4.5 安卓复用时）/ config.go:53 注释 stale（"留 CP4" 没兑现，改"pushkit 无启动校验空 URLs=禁用合法"）/ android.go apns.go stub `_ = msg`（改 `_ model.Message` 签名更干净）/ anyToCodeStr 单字母 `v`/`num`/ harmony.go:216 吞 io.ReadAll err（拼进 diagMsg）。
 - **触发**：下次摸 harmony.go（CP4.5 安卓 adapter 复用 fallback/retry 骨架前）随流清；P2-3 跟 TD-2 批。
+
+### TD-21 RegisterDevice patch overlay 双份重复（2026-07-22 全仓扫 NEW-A，用户点「功能多函数复制可合并」）
+- **现状**：`RegisterDevice` 的 patch overlay 逻辑（5 行：CreatedAt/UUID/Platform/PushToken/Type/Name 非空覆盖 + UpdatedAt）在 BBolt（store.go:159-170）+ Memory（memory.go:43-54）**逐字双份重复**。BBolt 抄在 json.Unmarshal 后、Memory 抄在 map 取出后——前置读取不同、中段 overlay 完全同构。
+- **风险**：静态 DRY（不炸），但加新 device 字段（app_version/device_model 等）要改两处，漏一处 BBolt/Memory 行为分叉 → 静默 bug。
+- **修**：抽 `applyDevicePatch(dev *model.Device, incoming model.Device, now time.Time)`（纯函数，store 包内 unexported），BBolt/Memory 各调一行。跟 mutateDevice（bbolt 事务写回壳）正交：mutateDevice 管「读改写事务壳」，applyDevicePatch 管「改」的内容。
+- **触发**：Phase 2 cleanup（跟 TD-2 / TD-20 P2-3 truncate-orVal 同批，都是「抽 helper 消重复」机械活）。
 
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 
