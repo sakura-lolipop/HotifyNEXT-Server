@@ -87,7 +87,22 @@ ServeMux 更具体优先：`/api/v1/*`、`/share/*`、`/messages/*`、`/register
 
 **register uuid 语义（token 刷新 vs 顶号，CP3c 跨审 C 文档化）**：register **不验 uuid 来源**——同 uuid 第二次 register 走 patch 语义覆盖第一次的 token（RegisterDevice 非空字段覆盖/空字段保留）。**契约：这是"token 刷新"合法**（设备重装/换机用同 uuid 续历史），**非"顶号漏洞"**——单用户可信域（App 自生成 UUIDv4，uuid 泄露概率低 + 泄露也只能刷自己 token、读端点仍要 key1 准入不窃历史）。跨户/不可信域要防顶号须加 uuid 来源验证（未来多户扩展再议）。**理论不出现**：可信域 + UUIDv4 碰撞概率忽略。
 
-**key 轮换 = 紧急重置（不搞无感轮换）**：日常 key1/key2 不变。发现泄露/要换 → **CLI 重置**（清 key1/key2）→ 设备重新 `/register` first-set 新 key1 + 拿新 key2（接受短暂中断、所有设备重连）。**为什么不搞无感轮换**（retired 重叠期 + WS `key_update`）：key_update 走 WS 下发 = 任何持有效 key1 的连接都收新 key1，**泄露方在重叠期连上就跟着拿新 key1，轮换对它无效**——共享密钥 + WS 下发的固有缺陷，调时长解决不了。Hotify 单用户可信域 key 泄露概率低，无感卫生轮换价值小（YAGNI），紧急重置（罕见）够用且更简单：**无 retired/过期/key_update 帧/key_ver**，key 机制只剩 first-set + 紧急重置。
+**key 管理（2026-07-22 修订：分 key1/key2 下发策略；原「不搞无感轮换」修正为「按是否碰鉴权分」）**：
+
+| | key1（域内凭证，设备读端点） | key2（跨户凭证，/share + /profile） |
+|---|---|---|
+| 生成 | first-set（空→server newID，首设备 register） | EnsureKey2（启动生成） |
+| **modify（非泄露，手动轮换）** | `POST /api/v1/keys` 旧 key1 鉴权 → 设新 key1，**不 WS 下发** | `POST /api/v1/keys` 旧 key1 鉴权 → 设新 key2，**WS key_update key2 下发** |
+| **reset（泄露，紧急）** | **CLI/SSH 本机**（不 through API——泄露方持旧 key1 能调 = 没改），清旧 + 设新/空，**不下发** | CLI/SSH 本机清旧 key2 + 设新，**WS key_update key2 下发** |
+| 设备获取新 key | reconnect 旧 key1 → 401 → 手动重 register first-set / owner 分享新 key1 | 后台 WS key_update（即时）+ 打开 share URL 强制刷新（GET 拉最新 key2） |
+
+**key1 不下发（碰鉴权 = 高危 bug 源）**：key1 参与 WS 连接鉴权，WS 下发新 key1 = 已连连接鉴权状态混乱（旧 key1 鉴权的连接 vs 新 key1）+ 时序竞态（设新 key1 → 设备收到 key_update 前断线 → 旧 key1 401）+ 泄露方在连接里收新 key1（无效）。**不碰 = 最稳**。
+
+**key2 可下发（不碰鉴权 = 低危）**：key2 **不参与连接鉴权**（连接用 key1），下发新 key2 只更新设备 share URL/config，不断连/不 401/不碰连接状态。bug 可控（share URL 窗口短 + offline 低危）。
+
+**share URL 双保险（无 bug）**：① 后台 WS `key_update` key2（即时下发，设备自动更新 share URL 缓存）；② **打开 share URL 页面强制刷新**（`GET /api/v1/keys` 拉最新 key2 覆盖缓存）。双保险 → share URL 一定最新 key2。
+
+**管理批 API 鉴权**：devices list/delete + messages clear + compact + backup = key1 鉴权（app 自动带无感）；`GET /api/v1/info` = 公开（version/build 无攻击特征）；reset = CLI/SSH 本机（不 API）；`POST /api/v1/keys` modify = 旧 key1 鉴权（app 无感）。
 
 **部署：全端点公网 + 自主 ACME（2026-07-21 改）**：App 远程收通知 → 全端点本就公网可达（原"反代只放 `/share`、其余锁 LAN"对通知转发器不现实，作废）；**key1/key2 app 层准入让全端点公网 ≠ 裸奔**。server **自主 ACME**（autocert）终结 TLS，不走反代；反代/LAN 锁降级可选双保险。残留：bark `/{key}` 写开放（兼容可选）+ first-set 窗口可见 DoS（§9 接受）。
 
