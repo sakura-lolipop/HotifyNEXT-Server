@@ -178,6 +178,20 @@
 - **修**：抽 `applyDevicePatch(dev *model.Device, incoming model.Device, now time.Time)`（纯函数，store 包内 unexported），BBolt/Memory 各调一行。跟 mutateDevice（bbolt 事务写回壳）正交：mutateDevice 管「读改写事务壳」，applyDevicePatch 管「改」的内容。
 - **触发**：Phase 2 cleanup（跟 TD-2 / TD-20 P2-3 truncate-orVal 同批，都是「抽 helper 消重复」机械活）。
 
+### TD-22 管理 API/CLI 批（2026-07-22 用户提：reset key/清空消息 没做）
+- **现状**：CP1-4 做功能，运维管理 API/CLI 后置没做：
+  - **reset key1/key2 CLI**：store `ResetKeys()` 有（CP1 占位实装，清 keys 桶），但 main.go 只 server 启动，**没 subcommand `reset-keys`**。taskNEXT §鉴权「CLI 重置」+ 按需「cmd/」已记。
+  - **清空消息**：**没端点 + 没 store 方法**（清 msgs 桶）。调试/重置要（ msgs 桶灌满 / 联调重置）。
+  - **设备 DELETE / 清 device·media 桶 / bbolt compact**：设备 DELETE Phase 2 已列（taskNEXT L60）；清桶 + compact 跟 FIFO TD-13 相关。
+- **归期**：
+  - **CP6（部署就绪）**：reset-key CLI（main.go subcommand or 独立 cmd，调 ResetKeys；部署运维 key 泄露紧急重置，**公网前要**）。
+  - **Phase 2**：清空消息 API（`DELETE /api/v1/messages`）+ 设备 DELETE（已列）+ 清 device/media 桶 + bbolt compact（FIFO TD-13 批）+ 备份/导出（已列）。
+- **怎么修**：
+  - reset-key CLI：main.go 加 subcommand（`hotify-server reset-keys` 调 st.ResetKeys + 提示设备重 register）；或独立 `cmd/reset-keys/`（按需「cmd/ 布局」触发：多二进制时升级）。
+  - 清空消息：store 加 `ClearMessages()`（msgs 桶 DeleteAll 或重建空桶）+ `DELETE /api/v1/messages` 端点（key1 鉴权 + 确认）。
+- **触发**：CP6（reset-key CLI 公网前）+ Phase 2（清空消息/清桶/compact/DELETE）。
+- **YAGNI 边界**：单用户自托管可 SSH 改 bbolt（或删 hotify.db 重来），CLI/API 是便利非必须——但 reset-key 公网部署后运维要（key 泄露紧急），清空消息调试要。公网前 reset-key 必，其余按需。
+
 ## 按需清单（触发条件强，不单独成 TD，免死债）
 
 - **`cmd/` 布局** —— 加 reset-key CLI / 多二进制时升级（当前单 main.go 在根够用）。
